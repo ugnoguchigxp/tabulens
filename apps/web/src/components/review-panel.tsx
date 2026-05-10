@@ -17,6 +17,7 @@ type ReviewPanelProps = {
   boundaryError: string | null;
   boundarySuggestedLabel?: string | null;
   onUseBoundarySuggestedLabel?: () => void;
+  showBoundary?: boolean;
   onRefreshReview: () => void;
   onApplyProposal: (proposalId: string) => void;
   onDiscardProposal: (proposalId: string) => void;
@@ -43,6 +44,7 @@ export function ReviewPanel({
   boundaryError,
   boundarySuggestedLabel,
   onUseBoundarySuggestedLabel,
+  showBoundary = true,
   onRefreshReview,
   onApplyProposal,
   onDiscardProposal,
@@ -61,7 +63,7 @@ export function ReviewPanel({
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Review</p>
-            <h3 className="text-lg font-bold text-foreground">Analysis QA</h3>
+            <h3 className="text-lg font-bold text-foreground">Prepare QA</h3>
           </div>
           <Button variant="outline" size="sm" onClick={onRefreshReview} disabled={isRefreshing || !jobId} className="gap-2">
             <RefreshCcw className={cn('size-4', isRefreshing && 'animate-spin')} />
@@ -123,13 +125,15 @@ export function ReviewPanel({
           </Card>
         )}
 
-        <BoundaryExplorer
-          boundary={boundary}
-          isLoading={boundaryLoading}
-          errorMessage={boundaryError}
-          suggestedLabel={boundarySuggestedLabel}
-          onUseSuggestedLabel={onUseBoundarySuggestedLabel}
-        />
+        {showBoundary && (
+          <BoundaryExplorer
+            boundary={boundary}
+            isLoading={boundaryLoading}
+            errorMessage={boundaryError}
+            suggestedLabel={boundarySuggestedLabel}
+            onUseSuggestedLabel={onUseBoundarySuggestedLabel}
+          />
+        )}
 
         <Card className="shadow-sm">
           <CardContent className="space-y-3 p-4">
@@ -210,7 +214,7 @@ export function ReviewPanel({
                 )
               }) : (
                 <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                  No proposals yet.
+                  No active proposals. Applied or discarded proposals are suppressed for this job.
                 </div>
               )}
             </div>

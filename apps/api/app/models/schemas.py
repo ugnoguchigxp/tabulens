@@ -21,10 +21,23 @@ class WorkbookUploadResponse(BaseModel):
     sheets: List[SheetInfo]
 
 class ColumnMapping(BaseModel):
-    feature_columns: List[str]
+    feature_columns: List[str] = Field(default_factory=list)
     label_column: Optional[str] = None
     id_column: Optional[str] = None
     exclude_columns: List[str] = Field(default_factory=list)
+    user_id_column: Optional[str] = None
+    item_id_column: Optional[str] = None
+    rating_column: Optional[str] = None
+    timestamp_column: Optional[str] = None
+
+
+class UseCaseType(str, Enum):
+    CLASSIFICATION = "classification"
+    PREDICTION = "prediction"
+    ANOMALY_DETECTION = "anomaly_detection"
+    RECOMMENDATION = "recommendation"
+    CLUSTERING = "clustering"
+    NOISE_REDUCTION = "noise_reduction"
 
 class AlgorithmType(str, Enum):
     RANDOM_FOREST = "random_forest"
@@ -56,6 +69,35 @@ class JobResponse(BaseModel):
     job_id: str
     status: str
     metadata: dict = Field(default_factory=dict)
+
+
+class ModelWorkflowRequest(BaseModel):
+    workbook_id: str
+    sheet_name: str
+    source_job_id: Optional[str] = None
+    use_case: UseCaseType = UseCaseType.CLASSIFICATION
+    mapping: ColumnMapping = Field(default_factory=ColumnMapping)
+    algorithm: str = "auto"
+    params: dict = Field(default_factory=dict)
+    preprocessing: PreprocessingSettings = Field(default_factory=PreprocessingSettings)
+
+
+class WorkflowMetrics(BaseModel):
+    values: dict = Field(default_factory=dict)
+
+
+class ModelWorkflowResponse(BaseModel):
+    workflow_id: str
+    status: str
+    use_case: UseCaseType
+    rows: List[dict] = Field(default_factory=list)
+    metrics: WorkflowMetrics = Field(default_factory=WorkflowMetrics)
+    metadata: dict = Field(default_factory=dict)
+
+
+class WorkflowRowsResponse(BaseModel):
+    workflow_id: str
+    rows: List[dict] = Field(default_factory=list)
 
 
 class ReviewAssessment(str, Enum):

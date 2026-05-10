@@ -28,7 +28,6 @@ from app.services.analysis_review import (
     build_review_summary,
     review_job,
     save_review_artifacts,
-    merge_proposal_statuses,
     proposal_key,
 )
 from app.services.job_store import load_job_state, save_job_state, save_result_artifacts
@@ -38,6 +37,7 @@ from app.services.ml.classifier import run_analysis
 router = APIRouter()
 
 jobs_db: dict[str, dict[str, Any]] = {}
+COMPLETED_PROPOSAL_STATUSES = {ProposalStatus.APPLIED, ProposalStatus.DISCARDED}
 
 
 def _normalize_proposals(proposals: list[ReviewAction]) -> list[ReviewAction]:
@@ -59,18 +59,63 @@ def _normalize_proposals(proposals: list[ReviewAction]) -> list[ReviewAction]:
     return normalized
 
 
+def _parse_proposals(raw_proposals: Any) -> list[ReviewAction]:
+    if not isinstance(raw_proposals, list):
+        return []
+
+    proposals: list[ReviewAction] = []
+    for item in raw_proposals:
+        try:
+            proposals.append(ReviewAction.model_validate(item))
+        except Exception:
+            continue
+    return proposals
+
+
+def _proposal_payload(proposals: list[ReviewAction]) -> list[dict[str, Any]]:
+    return [proposal.model_dump(mode="json") for proposal in proposals]
+
+
+def _is_completed_proposal(proposal: ReviewAction) -> bool:
+    return proposal.status in COMPLETED_PROPOSAL_STATUSES
+
+
+def _completed_proposal_keys(proposals: list[ReviewAction]) -> set[str]:
+    return {proposal_key(proposal) for proposal in proposals if _is_completed_proposal(proposal)}
+
+
+def _merge_resolved_proposals(*proposal_groups: list[ReviewAction]) -> list[ReviewAction]:
+    resolved: list[ReviewAction] = []
+    for group in proposal_groups:
+        resolved.extend(proposal for proposal in group if _is_completed_proposal(proposal))
+    return _normalize_proposals(resolved)
+
+
 def _normalize_job_state(state: dict[str, Any]) -> bool:
     changed = False
 
     raw_proposals = state.get("proposals", [])
-    try:
-        proposals = [ReviewAction.model_validate(item) for item in raw_proposals]
-    except Exception:
-        proposals = []
-    normalized_proposals = _normalize_proposals(proposals)
-    normalized_proposal_payload = [proposal.model_dump(mode="json") for proposal in normalized_proposals]
+    raw_resolved_proposals = state.get("resolved_proposals", [])
+    proposals = _parse_proposals(raw_proposals)
+    resolved_proposals = _merge_resolved_proposals(
+        _parse_proposals(raw_resolved_proposals),
+        proposals,
+    )
+    completed_keys = _completed_proposal_keys(resolved_proposals)
+    active_proposals = [
+        proposal.model_copy(deep=True)
+        for proposal in proposals
+        if proposal.status == ProposalStatus.PENDING and proposal_key(proposal) not in completed_keys
+    ]
+    normalized_proposals = _normalize_proposals(active_proposals)
+    normalized_proposal_payload = _proposal_payload(normalized_proposals)
     if normalized_proposal_payload != raw_proposals:
         state["proposals"] = normalized_proposal_payload
+        changed = True
+
+    normalized_resolved_payload = _proposal_payload(resolved_proposals)
+    if normalized_resolved_payload != raw_resolved_proposals:
+        state["resolved_proposals"] = normalized_resolved_payload
         changed = True
 
     raw_review_result = state.get("review_result")
@@ -147,6 +192,7 @@ async def create_job(request: JobRequest):
             "review_summary": summary.model_dump(mode="json"),
             "review_result": review_result.model_dump(mode="json"),
             "proposals": [proposal.model_dump(mode="json") for proposal in merged_proposals],
+            "resolved_proposals": [],
             "last_applied_proposals": [],
             "comparison": None,
         }
@@ -206,7 +252,11 @@ async def run_job_review(job_id: str):
         summary = _rebuild_review_summary(state)
 
     review_result = review_job(summary=summary)
-    merged_proposals = _compose_proposals([ReviewAction.model_validate(item) for item in state.get("proposals", [])], review_result.recommended_actions)
+    merged_proposals = _compose_proposals(
+        _parse_proposals(state.get("proposals", [])),
+        review_result.recommended_actions,
+        _parse_proposals(state.get("resolved_proposals", [])),
+    )
     review_result.recommended_actions = merged_proposals
     state["review_summary"] = summary.model_dump(mode="json")
     state["review_result"] = review_result.model_dump(mode="json")
@@ -225,7 +275,7 @@ async def run_job_review(job_id: str):
 @router.get("/{job_id}/proposals", response_model=ProposalListResponse)
 async def get_job_proposals(job_id: str):
     state = _get_job_state(job_id)
-    proposals = [ReviewAction.model_validate(item) for item in state.get("proposals", [])]
+    proposals = _parse_proposals(state.get("proposals", []))
     return ProposalListResponse(job_id=job_id, proposals=proposals)
 
 
@@ -237,24 +287,41 @@ async def apply_proposal(job_id: str, proposal_id: str):
 @router.post("/{job_id}/proposals/{proposal_id}/discard", response_model=ReviewAction)
 async def discard_proposal(job_id: str, proposal_id: str):
     state = _get_job_state(job_id)
-    proposals = [ReviewAction.model_validate(item) for item in state.get("proposals", [])]
-    updated: list[ReviewAction] = []
+    proposals = _parse_proposals(state.get("proposals", []))
+    active_proposals: list[ReviewAction] = []
+    discarded_proposals: list[ReviewAction] = []
     found: ReviewAction | None = None
     for proposal in proposals:
         if proposal.proposal_id == proposal_id:
-            proposal.status = ProposalStatus.DISCARDED
-            found = proposal
-        updated.append(proposal)
+            found = proposal.model_copy(deep=True)
+        active_proposals.append(proposal)
 
     if found is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
 
     target_key = proposal_key(found)
-    for proposal in updated:
+    remaining_proposals: list[ReviewAction] = []
+    for proposal in active_proposals:
         if proposal.proposal_id == proposal_id or proposal_key(proposal) == target_key:
-            proposal.status = ProposalStatus.DISCARDED
+            discarded = proposal.model_copy(deep=True)
+            discarded.status = ProposalStatus.DISCARDED
+            discarded_proposals.append(discarded)
+        else:
+            remaining_proposals.append(proposal)
 
-    state["proposals"] = [proposal.model_dump(mode="json") for proposal in updated]
+    found.status = ProposalStatus.DISCARDED
+    resolved_proposals = _merge_resolved_proposals(
+        _parse_proposals(state.get("resolved_proposals", [])),
+        discarded_proposals,
+    )
+    merged_proposals = _compose_proposals(remaining_proposals, [], resolved_proposals)
+
+    state["proposals"] = _proposal_payload(merged_proposals)
+    state["resolved_proposals"] = _proposal_payload(resolved_proposals)
+    if state.get("review_result"):
+        review_result = ReviewResult.model_validate(state["review_result"])
+        review_result.recommended_actions = [proposal.model_copy(deep=True) for proposal in merged_proposals]
+        state["review_result"] = review_result.model_dump(mode="json")
     _normalize_job_state(state)
     save_job_state(state)
     jobs_db[job_id] = state
@@ -331,7 +398,8 @@ async def export_job(job_id: str):
 async def _apply_and_compare(job_id: str, proposal_ids: list[str]) -> ComparisonResponse:
     state = _get_job_state(job_id)
     try:
-        previous_proposals = [ReviewAction.model_validate(item) for item in state.get("proposals", [])]
+        previous_proposals = _parse_proposals(state.get("proposals", []))
+        previous_resolved_proposals = _parse_proposals(state.get("resolved_proposals", []))
         (
             new_request,
             rerun_df,
@@ -345,20 +413,24 @@ async def _apply_and_compare(job_id: str, proposal_ids: list[str]) -> Comparison
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     current_csv_path, current_xlsx_path = save_result_artifacts(job_id, rerun_df, name="current")
-    save_review_artifacts(
-        artifact_dir=_job_dir(job_id),
-        summary=current_summary,
-        review_result=review_result,
-    )
-
     comparison = build_comparison(
         job_id=job_id,
         before=baseline_summary,
         after=current_summary,
         applied_proposals=applied_proposals,
     )
-    merged_proposals = _compose_proposals(previous_proposals + applied_proposals, review_result.recommended_actions)
+    resolved_proposals = _merge_resolved_proposals(previous_resolved_proposals, applied_proposals)
+    merged_proposals = _compose_proposals(
+        previous_proposals,
+        review_result.recommended_actions,
+        resolved_proposals,
+    )
     review_result.recommended_actions = merged_proposals
+    save_review_artifacts(
+        artifact_dir=_job_dir(job_id),
+        summary=current_summary,
+        review_result=review_result,
+    )
 
     state.update(
         {
@@ -370,6 +442,7 @@ async def _apply_and_compare(job_id: str, proposal_ids: list[str]) -> Comparison
             "review_summary": current_summary.model_dump(mode="json"),
             "review_result": review_result.model_dump(mode="json"),
             "proposals": [proposal.model_dump(mode="json") for proposal in merged_proposals],
+            "resolved_proposals": [proposal.model_dump(mode="json") for proposal in resolved_proposals],
             "last_applied_proposals": [proposal.model_dump(mode="json") for proposal in applied_proposals],
             "comparison": comparison.model_dump(mode="json"),
         }
@@ -502,18 +575,26 @@ def _rebuild_review_summary(state: dict[str, Any]) -> ReviewSummary:
 def _compose_proposals(
     existing_proposals: list[ReviewAction],
     new_proposals: list[ReviewAction],
+    resolved_proposals: list[ReviewAction] | None = None,
 ) -> list[ReviewAction]:
     existing_models = [ReviewAction.model_validate(item) for item in existing_proposals]
-    status_map: dict[str, ProposalStatus] = {}
+    resolved_models = _merge_resolved_proposals(resolved_proposals or [], existing_models)
+    completed_keys = _completed_proposal_keys(resolved_models)
+
+    active_new: list[ReviewAction] = []
+    for proposal in new_proposals:
+        if proposal_key(proposal) in completed_keys:
+            continue
+        item = proposal.model_copy(deep=True)
+        item.status = ProposalStatus.PENDING
+        active_new.append(item)
+
+    active_existing: list[ReviewAction] = []
     for proposal in existing_models:
-        if proposal.status in {ProposalStatus.APPLIED, ProposalStatus.DISCARDED}:
-            status_map[proposal_key(proposal)] = proposal.status
+        if proposal.status != ProposalStatus.PENDING or proposal_key(proposal) in completed_keys:
+            continue
+        item = proposal.model_copy(deep=True)
+        item.status = ProposalStatus.PENDING
+        active_existing.append(item)
 
-    merged = merge_proposal_statuses(new_proposals, status_map)
-    merged_keys = {proposal_key(proposal) for proposal in merged}
-
-    for proposal in existing_models:
-        if proposal.status in {ProposalStatus.APPLIED, ProposalStatus.DISCARDED} and proposal_key(proposal) not in merged_keys:
-            merged.append(proposal.model_copy(deep=True))
-
-    return merged
+    return _normalize_proposals(active_new + active_existing)

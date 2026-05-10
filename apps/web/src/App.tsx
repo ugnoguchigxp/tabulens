@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { AgGridReact } from 'ag-grid-react'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-quartz.css'
-import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Wand2, Sparkles, Database, Filter, Gauge, ArrowDownNarrowWide, CheckSquare, Square, Maximize2 } from 'lucide-react'
+import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Wand2, Sparkles, Database, Filter, Gauge, ArrowDownNarrowWide, CheckSquare, Square, Maximize2, Play } from 'lucide-react'
 import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community'
 
 ModuleRegistry.registerModules([AllCommunityModule])
@@ -14,15 +14,20 @@ import { Card, CardContent } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { BoundaryExplorer } from '@/components/boundary-explorer'
 import { ReviewPanel } from '@/components/review-panel'
+import { WorkflowDrawer } from '@/components/workflow-drawer'
+import { WorkflowPanel } from '@/components/workflow-panel'
+import { apiClient } from '@/lib/api-client'
 import {
   useUploadWorkbook,
   useRunAnalysis,
+  useRunModelWorkflow,
   useJobResults,
   useJobReviewSummary,
   useJobReviewResult,
   useJobProposals,
   useJobCompare,
   useJobBoundary,
+  useWorkflowBoundary,
   useReviewJob,
   useApplyProposal,
   useDiscardProposal,
@@ -53,6 +58,18 @@ interface ColumnMapping {
   feature_columns: string[]
   label_column: string
   id_column: string
+  user_id_column?: string
+  item_id_column?: string
+  rating_column?: string
+  timestamp_column?: string
+}
+
+type WorkflowUseCase = 'classification' | 'prediction' | 'anomaly_detection' | 'recommendation' | 'clustering' | 'noise_reduction'
+
+type WorkflowSettings = {
+  use_case: WorkflowUseCase
+  algorithm: string
+  params: Record<string, any>
 }
 
 interface ContextMenuState {
@@ -87,13 +104,52 @@ function suggestMapping(sheet: WorkbookSheet): ColumnMapping {
   }
 }
 
+function inferColumnsFromRows(rows: GridRow[]): WorkbookColumn[] {
+  const firstRow = rows[0]
+  if (!firstRow) return []
+  return Object.keys(firstRow).map((name) => {
+    const sample = rows.find((row) => row[name] !== null && row[name] !== undefined)?.[name]
+    return {
+      name,
+      inferred_type: typeof sample === 'number' ? 'float64' : typeof sample === 'boolean' ? 'bool' : 'object',
+      missing_count: rows.filter((row) => row[name] === null || row[name] === undefined || row[name] === '').length,
+    }
+  })
+}
+
+function createDefaultWorkflowSettings(): WorkflowSettings {
+  return {
+    use_case: 'classification',
+    algorithm: 'random_forest',
+    params: {
+      task_type: 'classification',
+      split_mode: 'ratio',
+      train_size: 0.8,
+      test_size: 0.2,
+      random_state: 42,
+      contamination: 0.1,
+      n_neighbors: 10,
+      cluster_count: 3,
+      eps: 0.8,
+      min_samples: 5,
+      top_k: 5,
+      apply_mode: 'preview',
+      missing_row_threshold: 0.5,
+    },
+  }
+}
+
 function App() {
   const [selectedSheet, setSelectedSheet] = useState<number>(0)
   const [mapping, setMapping] = useState<ColumnMapping>({ feature_columns: [], label_column: '', id_column: '' })
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const [activeWorkflowId, setActiveWorkflowId] = useState<string | null>(null)
   const [jobMetadata, setJobMetadata] = useState<Record<string, unknown> | null>(null)
+  const [workflowResult, setWorkflowResult] = useState<any | null>(null)
   const [showSettings, setShowSettings] = useState(true)
   const [showReviewPanel, setShowReviewPanel] = useState(true)
+  const [showWorkflowPanel, setShowWorkflowPanel] = useState(true)
+  const [showWorkflowDrawer, setShowWorkflowDrawer] = useState(false)
   const [showBoundaryModal, setShowBoundaryModal] = useState(false)
   const [showAnalysisDrawer, setShowAnalysisDrawer] = useState(false)
   const [localRowData, setLocalRowData] = useState<GridRow[]>([])
@@ -105,7 +161,6 @@ function App() {
   const [analysisSettings, setAnalysisSettings] = useState({
     run_cleansing: true,
     run_feature_selection: true,
-    run_ml: true,
     algorithm: 'random_forest',
     preprocessing: {
       handle_missing: 'mean',
@@ -116,12 +171,14 @@ function App() {
       feature_selection_threshold: 0.01
     }
   })
+  const [workflowSettings, setWorkflowSettings] = useState<WorkflowSettings>(() => createDefaultWorkflowSettings())
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const gridRef = useRef<AgGridReact>(null)
 
   const uploadMutation = useUploadWorkbook()
   const analysisMutation = useRunAnalysis()
+  const workflowMutation = useRunModelWorkflow()
   const { data: resultRows, isLoading: resultsLoading } = useJobResults(activeJobId)
   const { data: reviewSummary } = useJobReviewSummary(activeJobId)
   const { data: reviewResult } = useJobReviewResult(activeJobId)
@@ -131,6 +188,11 @@ function App() {
   const reviewMutation = useReviewJob(activeJobId)
   const applyProposalMutation = useApplyProposal(activeJobId)
   const discardProposalMutation = useDiscardProposal(activeJobId)
+  const {
+    data: workflowBoundary,
+    isLoading: workflowBoundaryLoading,
+    error: workflowBoundaryError,
+  } = useWorkflowBoundary(activeWorkflowId, !!activeWorkflowId && workflowResult?.use_case === 'classification')
 
   const workbookData = uploadMutation.data as WorkbookUploadResponse | undefined
   const featureImportance = jobMetadata?.feature_importance as Record<string, number> | undefined
@@ -139,14 +201,25 @@ function App() {
   const proposalItems = Array.isArray(proposals?.proposals) ? proposals.proposals : []
   const activeSheet = workbookData?.sheets[selectedSheet]
   const sourceRowCount = activeSheet?.row_count ?? 0
-  const processedRowCount = resultRows?.length ?? 0
+  const processedRowCount = activeWorkflowId
+    ? Array.isArray(workflowResult?.rows)
+      ? workflowResult.rows.length
+      : 0
+    : resultRows?.length ?? 0
   const displayedRowCount = localRowData.length
   const suggestedMapping = activeSheet ? suggestMapping(activeSheet) : null
   const selectedLabelColumn = activeSheet?.columns.find((column) => column.name === mapping.label_column) ?? null
   const selectedLabelIsCategorical = selectedLabelColumn ? !isNumericColumn(selectedLabelColumn) : false
   const boundaryFeatureCount = mapping.feature_columns.filter((feature) => feature !== mapping.label_column).length
   const boundaryReady = !!mapping.label_column && selectedLabelIsCategorical && boundaryFeatureCount >= 2
-  const allowDraftRowExtension = !resultRows
+  const workflowBoundaryReady = !!activeWorkflowId && workflowResult?.use_case === 'classification'
+  const allowDraftRowExtension = !resultRows && !activeWorkflowId
+  const isProcessing = resultsLoading || analysisMutation.isPending || workflowMutation.isPending
+  const preparedSourceColumns = activeJobId ? inferColumnsFromRows(localRowData) : undefined
+  const preparedSourceRowCount = activeJobId ? localRowData.length : undefined
+  const activeBoundary = workflowBoundaryReady ? workflowBoundary : boundary
+  const activeBoundaryLoading = workflowBoundaryReady ? workflowBoundaryLoading : boundaryLoading
+  const activeBoundaryError = workflowBoundaryReady ? workflowBoundaryError : boundaryError
 
   useEffect(() => {
     setProposalStatusById({})
@@ -154,19 +227,22 @@ function App() {
 
   useEffect(() => {
     if (resultRows) setLocalRowData(resultRows)
+    else if (activeWorkflowId && Array.isArray(workflowResult?.rows)) {
+      setLocalRowData(workflowResult.rows)
+    }
     else if (workbookData) {
       const sheet = workbookData.sheets[selectedSheet]
       setLocalRowData(sheet.rows ?? sheet.preview_rows)
     }
-  }, [resultRows, workbookData, selectedSheet])
+  }, [resultRows, activeWorkflowId, workflowResult, workbookData, selectedSheet])
 
   useEffect(() => {
     if (activeJobId) setShowReviewPanel(true)
   }, [activeJobId])
 
   useEffect(() => {
-    if (!activeJobId) setShowBoundaryModal(false)
-  }, [activeJobId])
+    if (!activeJobId && !workflowBoundaryReady) setShowBoundaryModal(false)
+  }, [activeJobId, workflowBoundaryReady])
 
   useEffect(() => {
     if (!showBoundaryModal) return
@@ -193,7 +269,13 @@ function App() {
         onSuccess: (data) => {
           const sheet = data.sheets[0]
           setMapping(suggestMapping(sheet))
-          setActiveJobId(null); setJobMetadata(null); setSelectedSheet(0)
+          setActiveJobId(null)
+          setActiveWorkflowId(null)
+          setJobMetadata(null)
+          setWorkflowResult(null)
+          setSelectedSheet(0)
+          setShowReviewPanel(true)
+          setShowWorkflowPanel(true)
         }
       })
     }
@@ -209,13 +291,23 @@ function App() {
       preprocessing: analysisSettings.preprocessing,
       run_cleansing: analysisSettings.run_cleansing,
       run_feature_selection: analysisSettings.run_feature_selection,
-      run_ml: analysisSettings.run_ml
+      run_ml: false
     }, {
       onSuccess: (data) => {
         setActiveJobId(data.job_id)
+        setActiveWorkflowId(null)
+        setWorkflowResult(null)
         setJobMetadata(data.metadata)
+        const selected = Array.isArray(data.metadata?.selected_features) ? data.metadata.selected_features : []
+        if (selected.length > 0) {
+          setMapping((current) => ({
+            ...current,
+            feature_columns: current.feature_columns.filter((feature) => selected.includes(feature)),
+          }))
+        }
         setShowAnalysisDrawer(false)
         setShowReviewPanel(true)
+        setShowWorkflowPanel(false)
       }
     })
   }
@@ -232,6 +324,38 @@ function App() {
     }
     setMapping(nextMapping)
     await submitAnalysis(nextMapping)
+  }
+
+  const submitWorkflow = async () => {
+    if (!workbookData || !activeSheet || !activeJobId) return
+
+    const nextMapping: ColumnMapping = {
+      ...mapping,
+      feature_columns: mapping.feature_columns.filter((feature) => feature !== mapping.label_column),
+    }
+
+    workflowMutation.mutate({
+      workbook_id: workbookData.workbook_id,
+      sheet_name: activeSheet.name,
+      source_job_id: activeJobId,
+      use_case: workflowSettings.use_case,
+      mapping: nextMapping,
+      algorithm: workflowSettings.algorithm,
+      params: workflowSettings.params,
+    }, {
+      onSuccess: (data) => {
+        setActiveWorkflowId(data.workflow_id)
+        setWorkflowResult(data)
+        setActiveJobId(null)
+        setJobMetadata(null)
+        setShowWorkflowDrawer(false)
+        setShowWorkflowPanel(true)
+        setShowReviewPanel(false)
+        if (Array.isArray(data.rows)) {
+          setLocalRowData(data.rows)
+        }
+      },
+    })
   }
 
   const handleApplyProposal = useCallback((proposalId: string) => {
@@ -357,7 +481,7 @@ function App() {
         </div>
       )}
 
-      {/* Analysis Drawer */}
+      {/* Prepare Drawer */}
       {showAnalysisDrawer && (
         <div className="fixed inset-0 z-[110] flex justify-end bg-background/40 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="w-[450px] bg-background border-l shadow-2xl h-full flex flex-col animate-in slide-in-from-right duration-300">
@@ -365,8 +489,8 @@ function App() {
               <div className="flex items-center gap-3">
                 <div className="bg-primary/10 p-2 rounded-full"><Wand2 className="size-6 text-primary" /></div>
                 <div>
-                  <h2 className="text-xl font-bold">Analysis Engine</h2>
-                  <p className="text-xs text-muted-foreground">Configure AI model & preprocessing</p>
+                  <h2 className="text-xl font-bold">Prepare Dataset</h2>
+                  <p className="text-xs text-muted-foreground">Clean data and optimize columns before training</p>
                 </div>
               </div>
               <Button variant="ghost" size="icon" onClick={() => setShowAnalysisDrawer(false)}><X className="size-5" /></Button>
@@ -425,7 +549,7 @@ function App() {
               <section className={cn("space-y-4 transition-opacity", !analysisSettings.run_feature_selection && "opacity-50")}>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                    <Filter className="size-4" /> 2. Feature Selection (RF)
+                    <Filter className="size-4" /> 2. Feature Selection
                   </div>
                   <button 
                     onClick={() => setAnalysisSettings({...analysisSettings, run_feature_selection: !analysisSettings.run_feature_selection})}
@@ -449,50 +573,10 @@ function App() {
                         onChange={e => setAnalysisSettings({...analysisSettings, preprocessing: {...analysisSettings.preprocessing, feature_selection_threshold: parseFloat(e.target.value)}})}
                         className="w-full accent-primary disabled:opacity-50"
                       />
-                      <p className="text-[10px] text-muted-foreground italic">Uses Random Forest by default to calculate importance.</p>
+                      <p className="text-[10px] text-muted-foreground italic">Calculates feature importance and marks weak columns before workflow training.</p>
                     </div>
                   </CardContent>
                 </Card>
-              </section>
-
-              {/* Algorithm Section */}
-              <section className={cn("space-y-4 transition-opacity", !analysisSettings.run_ml && "opacity-50")}>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                    <Sparkles className="size-4" /> 3. ML Algorithm
-                  </div>
-                  <button 
-                    onClick={() => setAnalysisSettings({...analysisSettings, run_ml: !analysisSettings.run_ml})}
-                    className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-primary hover:bg-primary/5 px-2 py-1 rounded"
-                  >
-                    {analysisSettings.run_ml ? <CheckSquare className="size-4" /> : <Square className="size-4" />}
-                    {analysisSettings.run_ml ? "Enabled" : "Disabled"}
-                  </button>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  {[
-                    { id: 'random_forest', name: 'Random Forest', type: 'Classification/Reg' },
-                    { id: 'gradient_boosting', name: 'Gradient Boosting', type: 'Advanced' },
-                    { id: 'svm', name: 'SVM', type: 'Kernel Based' },
-                    { id: 'logistic_regression', name: 'Logistic Regression', type: 'Linear' },
-                    { id: 'linear_regression', name: 'Linear Regression', type: 'Prediction' }
-                  ].map(algo => (
-                    <button
-                      key={algo.id}
-                      disabled={!analysisSettings.run_ml}
-                      onClick={() => setAnalysisSettings({ ...analysisSettings, algorithm: algo.id })}
-                      className={cn(
-                        "flex flex-col items-start p-4 rounded-xl border-2 text-left transition-all disabled:opacity-50 disabled:hover:border-border",
-                        analysisSettings.algorithm === algo.id 
-                          ? "border-primary bg-primary/5 ring-4 ring-primary/10" 
-                          : "border-border hover:border-primary/50"
-                      )}
-                    >
-                      <span className="font-bold text-sm">{algo.name}</span>
-                      <span className="text-[10px] opacity-60 mt-1">{algo.type}</span>
-                    </button>
-                  ))}
-                </div>
               </section>
             </div>
 
@@ -502,16 +586,33 @@ function App() {
                 onClick={handleRunAnalysis}
                 disabled={analysisMutation.isPending || mapping.feature_columns.length === 0}
               >
-                {analysisMutation.isPending ? 'Processing Pipeline...' : (
+                {analysisMutation.isPending ? 'Preparing Dataset...' : (
                   <>
                     <Sparkles className="size-5" />
-                    Confirm & Start Pipeline
+                    Run Prepare
                   </>
                 )}
               </Button>
             </div>
           </div>
         </div>
+      )}
+
+      {showWorkflowDrawer && workbookData && (
+            <WorkflowDrawer
+              workbookData={workbookData}
+              selectedSheet={selectedSheet}
+              sourceColumns={preparedSourceColumns}
+              sourceRowCount={preparedSourceRowCount}
+              sourceLabel={activeJobId ? 'Prepared Dataset' : undefined}
+              mapping={mapping}
+          setMapping={setMapping}
+          workflowSettings={workflowSettings}
+          setWorkflowSettings={setWorkflowSettings}
+          onClose={() => setShowWorkflowDrawer(false)}
+          onRun={submitWorkflow}
+          isRunning={workflowMutation.isPending}
+        />
       )}
 
       {/* Header */}
@@ -527,7 +628,9 @@ function App() {
                 const nextSheet = Number(e.target.value)
                 setSelectedSheet(nextSheet)
                 setActiveJobId(null)
+                setActiveWorkflowId(null)
                 setJobMetadata(null)
+                setWorkflowResult(null)
                 if (workbookData?.sheets[nextSheet]) {
                   setMapping(suggestMapping(workbookData.sheets[nextSheet]))
                 }
@@ -551,24 +654,59 @@ function App() {
                     size="sm"
                     className="h-9 gap-2 px-3"
                     onClick={() => setShowReviewPanel(!showReviewPanel)}
-                  >
-                    <BarChart3 className="size-4" />
-                    <span className="hidden sm:inline">Review</span>
-                  </Button>
+                    >
+                      <BarChart3 className="size-4" />
+                      <span className="hidden sm:inline">Prep Review</span>
+                    </Button>
+                  </>
+                )}
+              {activeWorkflowId && (
+                <>
                   <Button
-                    variant={showBoundaryModal ? "secondary" : "ghost"}
+                    variant={showWorkflowPanel ? "secondary" : "ghost"}
                     size="sm"
                     className="h-9 gap-2 px-3"
-                    onClick={() => setShowBoundaryModal(true)}
+                    onClick={() => setShowWorkflowPanel(!showWorkflowPanel)}
                   >
-                    <Maximize2 className="size-4" />
-                    <span className="hidden sm:inline">Graph</span>
+                    <Database className="size-4" />
+                    <span className="hidden sm:inline">Workflow</span>
                   </Button>
+                  {workflowBoundaryReady && (
+                    <Button
+                      variant={showBoundaryModal ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-9 gap-2 px-3"
+                      onClick={() => setShowBoundaryModal(true)}
+                    >
+                      <Maximize2 className="size-4" />
+                      <span className="hidden sm:inline">Graph</span>
+                    </Button>
+                  )}
                 </>
               )}
-              <Button className="h-9 gap-2 px-4 ml-1 shadow-sm" onClick={() => setShowAnalysisDrawer(true)}>
+              <Button
+                className="h-9 gap-2 px-4 ml-1 shadow-sm"
+                onClick={() => {
+                  setShowWorkflowDrawer(false)
+                  setShowAnalysisDrawer(true)
+                }}
+              >
                 <Sparkles className="size-4" />
-                <span className="hidden sm:inline">Analyze</span>
+                <span className="hidden sm:inline">Prepare</span>
+              </Button>
+              <Button
+                variant="secondary"
+                className="h-9 gap-2 px-4 shadow-sm"
+                disabled={!activeJobId}
+                title={!activeJobId ? 'Run Prepare before Workflow' : 'Open Workflow'}
+                onClick={() => {
+                  if (!activeJobId) return
+                  setShowAnalysisDrawer(false)
+                  setShowWorkflowDrawer(true)
+                }}
+              >
+                <Play className="size-4" />
+                <span className="hidden sm:inline">Workflow</span>
               </Button>
             </>
           )}
@@ -663,7 +801,7 @@ function App() {
                         </button>
                       </div>
                       <p className="mt-1 text-[10px] text-amber-700">
-                        This will enable the boundary graph after rerunning analysis.
+                        This will update the prepared feature set before workflow training.
                       </p>
                     </div>
                   )}
@@ -672,12 +810,12 @@ function App() {
                     boundaryReady ? "text-emerald-700" : "text-muted-foreground"
                   )}>
                     {boundaryReady
-                      ? "Boundary graph is shown below in this sidebar and in Review."
+                      ? "Classification Workflow の完了後に Graph ボタンから境界グラフを表示できます。"
                       : selectedLabelColumn
                         ? (selectedLabelIsCategorical
-                          ? "Choose at least two feature columns to show the boundary graph."
+                          ? "境界グラフには2つ以上の特徴量が必要です。"
                           : `The selected label (${selectedLabelColumn.name}) is numeric. Pick a categorical label such as segment.`)
-                        : "Choose a categorical label to enable the boundary graph."}
+                        : "分類境界グラフにはカテゴリ型の Label が必要です。"}
                   </p>
                 </div>
                 <div className="space-y-2">
@@ -717,23 +855,6 @@ function App() {
                 </div>
               </div>
 
-              {activeJobId && (
-                <div className="space-y-3 pt-2 border-t border-slate-200">
-                  <div className="space-y-1">
-                    <h3 className="text-sm font-semibold flex items-center gap-2">
-                      <BarChart3 className="size-4" />
-                      Boundary Graph
-                    </h3>
-                    <p className="text-[10px] text-muted-foreground">
-                      Open the decision boundary in a larger modal for inspection.
-                    </p>
-                  </div>
-                  <Button className="w-full gap-2" variant="secondary" onClick={() => setShowBoundaryModal(true)}>
-                    <Maximize2 className="size-4" />
-                    Open Graph
-                  </Button>
-                </div>
-              )}
             </div>
           </aside>
         )}
@@ -748,7 +869,7 @@ function App() {
               </div>
             ) : (
               <div className="flex-1 ag-theme-quartz relative" onContextMenu={e => e.preventDefault()}>
-                {resultsLoading && (<div className="absolute inset-0 z-50 flex items-center justify-center bg-background/50 backdrop-blur-sm"><Badge variant="secondary" className="animate-pulse py-2 px-4 text-sm gap-2 shadow-lg"><Sparkles className="size-4" /> Processing Pipeline...</Badge></div>)}
+                {isProcessing && (<div className="absolute inset-0 z-50 flex items-center justify-center bg-background/50 backdrop-blur-sm"><Badge variant="secondary" className="animate-pulse py-2 px-4 text-sm gap-2 shadow-lg"><Sparkles className="size-4" /> Processing...</Badge></div>)}
                 <AgGridReact
                   ref={gridRef}
                   rowData={localRowData}
@@ -796,6 +917,19 @@ function App() {
             )}
           </div>
 
+          {activeWorkflowId && showWorkflowPanel && (
+            <WorkflowPanel
+              workflowId={activeWorkflowId}
+              useCase={workflowResult?.use_case ?? workflowSettings.use_case}
+              result={workflowResult}
+              onDownloadModel={() => {
+                void apiClient.exportModelArtifact(activeWorkflowId).then((url) => {
+                  window.location.href = url
+                })
+              }}
+            />
+          )}
+
           {activeJobId && showReviewPanel && (
             <ReviewPanel
               jobId={activeJobId}
@@ -823,6 +957,7 @@ function App() {
               isRefreshing={reviewMutation.isPending}
               isApplying={applyProposalMutation.isPending}
               isDiscarding={discardProposalMutation.isPending}
+              showBoundary={false}
             />
           )}
         </div>
@@ -846,13 +981,15 @@ function App() {
             )}
           </div>
           <div className="flex items-center gap-2">
-                <Badge variant="outline" className="h-4 px-1 text-[9px] tracking-wider uppercase font-bold bg-white">{activeJobId ? 'Pipeline Completed' : 'Ready'}</Badge>
-                <span className="font-mono opacity-50">v1.3.0-ai</span>
-              </div>
-            </footer>
-          )}
+            <Badge variant="outline" className="h-4 px-1 text-[9px] tracking-wider uppercase font-bold bg-white">
+              {activeJobId ? 'Prepare Completed' : activeWorkflowId ? 'Workflow Completed' : 'Ready'}
+            </Badge>
+            <span className="font-mono opacity-50">v1.3.0-ai</span>
+          </div>
+        </footer>
+      )}
 
-      {showBoundaryModal && activeJobId && (
+      {showBoundaryModal && (activeJobId || workflowBoundaryReady) && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/60 px-3 py-4 backdrop-blur-sm"
           onClick={() => setShowBoundaryModal(false)}
@@ -875,16 +1012,16 @@ function App() {
             </div>
             <div className="flex-1 overflow-y-auto p-4">
               <BoundaryExplorer
-                boundary={boundary ?? null}
-                isLoading={boundaryLoading}
-                errorMessage={boundaryError instanceof Error ? boundaryError.message : boundaryError ? String(boundaryError) : null}
+                boundary={activeBoundary ?? null}
+                isLoading={activeBoundaryLoading}
+                errorMessage={activeBoundaryError instanceof Error ? activeBoundaryError.message : activeBoundaryError ? String(activeBoundaryError) : null}
                 suggestedLabel={
-                  suggestedMapping && suggestedMapping.label_column && suggestedMapping.label_column !== mapping.label_column
+                  !workflowBoundaryReady && suggestedMapping && suggestedMapping.label_column && suggestedMapping.label_column !== mapping.label_column
                     ? suggestedMapping.label_column
                     : null
                 }
                 onUseSuggestedLabel={
-                  suggestedMapping && suggestedMapping.label_column && suggestedMapping.label_column !== mapping.label_column
+                  !workflowBoundaryReady && suggestedMapping && suggestedMapping.label_column && suggestedMapping.label_column !== mapping.label_column
                     ? handleUseSuggestedLabel
                     : undefined
                 }

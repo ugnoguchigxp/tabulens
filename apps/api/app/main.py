@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import workbooks, jobs
+from app.routers import workbooks, jobs, model_workflows
 from app.middleware.rate_limiter import RateLimitMiddleware
 from app.middleware.secure_headers import SecureHeadersMiddleware
 from app.middleware.error_handler import global_exception_handler
@@ -32,6 +32,7 @@ app.add_middleware(
 
 app.include_router(workbooks.router, prefix="/api/workbooks", tags=["workbooks"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
+app.include_router(model_workflows.router, prefix="/api/model-workflows", tags=["model-workflows"])
 
 @app.get("/")
 async def root():

@@ -134,6 +134,9 @@ def proposal_key(proposal: ReviewAction) -> str:
         "action": _to_jsonable(proposal.action),
         "target": _normalize_for_key(proposal.target),
     }
+    normalized_params = _normalize_for_key(proposal.params or {})
+    if normalized_params:
+        payload["params"] = normalized_params
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 

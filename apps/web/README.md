@@ -1,73 +1,42 @@
-# React + TypeScript + Vite
+# TabuLens Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+TabuLens の React / TypeScript フロントエンドです。
 
-Currently, two official plugins are available:
+## 起動
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+pnpm install
+pnpm dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+既定の起動 URL は `http://localhost:29384` です。
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## API 接続
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+既定では `http://localhost:18273/api` に接続します。
+
+API の URL を変更する場合は `VITE_API_BASE_URL` を指定します。
+
+```bash
+VITE_API_BASE_URL=http://localhost:18273/api pnpm dev
+```
+
+## 主な画面機能
+
+- `.xlsx` / `.csv` のアップロード
+- シート選択
+- AG Grid による表表示
+- Mapping Settings での ID / Label / Feature 指定
+- `Prepare` によるクレンジング、特徴量選択、AI レビュー、改善提案
+- `Workflow` による classification / prediction / anomaly detection / recommendation / clustering / noise reduction 実行
+- Prepare 済みデータを使った Workflow 学習
+- 予測モデル artifact のダウンロード
+- Prepare 結果と Workflow 結果の表示切り替え
+
+## 開発コマンド
+
+```bash
+pnpm build
+pnpm lint
+pnpm preview
 ```

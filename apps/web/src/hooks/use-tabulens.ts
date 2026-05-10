@@ -23,6 +23,12 @@ export function useRunAnalysis() {
   });
 }
 
+export function useRunModelWorkflow() {
+  return useMutation({
+    mutationFn: (payload: any) => apiClient.runModelWorkflow(payload),
+  });
+}
+
 export function useJobResults(jobId: string | null) {
   return useQuery({
     queryKey: ['job-results', jobId],
@@ -68,6 +74,15 @@ export function useJobBoundary(jobId: string | null) {
     queryKey: ['job-boundary', jobId],
     queryFn: () => apiClient.getJobBoundary(jobId!),
     enabled: !!jobId,
+    retry: false,
+  });
+}
+
+export function useWorkflowBoundary(workflowId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ['workflow-boundary', workflowId],
+    queryFn: () => apiClient.getModelWorkflowBoundary(workflowId!),
+    enabled: !!workflowId && enabled,
     retry: false,
   });
 }
