@@ -219,6 +219,98 @@ class ComparisonResponse(BaseModel):
     accepted: bool = False
 
 
+class ModelReviewAssessment(str, Enum):
+    PASS = "pass"
+    NEEDS_IMPROVEMENT = "needs_improvement"
+    REJECT = "reject"
+    REVIEW_MANUALLY = "review_manually"
+    NEEDS_MORE_DATA = "needs_more_data"
+
+
+class ModelReviewActionType(str, Enum):
+    ADJUST_DECISION_THRESHOLD = "adjust_decision_threshold"
+    REBALANCE_CLASSES = "rebalance_classes"
+    ENABLE_STRATIFIED_SPLIT = "enable_stratified_split"
+    INCREASE_TEST_SIZE = "increase_test_size"
+    SWITCH_ALGORITHM = "switch_algorithm"
+    TUNE_HYPERPARAMETERS = "tune_hyperparameters"
+    DROP_LEAKY_FEATURES = "drop_leaky_features"
+    NORMALIZE_FEATURES = "normalize_features"
+    ADJUST_CONTAMINATION = "adjust_contamination"
+    ADJUST_CLUSTER_COUNT = "adjust_cluster_count"
+    ADJUST_DBSCAN_EPS = "adjust_dbscan_eps"
+    SWITCH_TO_PREVIEW_MODE = "switch_to_preview_mode"
+    REVIEW_LABEL_QUALITY = "review_label_quality"
+    COLLECT_MORE_DATA = "collect_more_data"
+
+
+class ModelReviewAction(BaseModel):
+    proposal_id: str = Field(default_factory=lambda: str(uuid4()))
+    action: ModelReviewActionType
+    target: Any = None
+    reason: str = ""
+    expected_effect: Optional[str] = None
+    safe_to_apply: bool = False
+    params: Dict[str, Any] = Field(default_factory=dict)
+    status: ProposalStatus = ProposalStatus.PENDING
+
+
+class ModelReviewSummary(BaseModel):
+    workflow_id: str
+    source_job_id: Optional[str] = None
+    workbook_id: str
+    sheet_name: str
+    use_case: UseCaseType
+    algorithm: str
+    row_count: int
+    train_count: int = 0
+    test_count: int = 0
+    unused_count: int = 0
+    feature_columns: List[str] = Field(default_factory=list)
+    label_column: Optional[str] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    quality_flags: List[str] = Field(default_factory=list)
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
+    feature_importance: List[Dict[str, Any]] = Field(default_factory=list)
+    sample_errors: List[Dict[str, Any]] = Field(default_factory=list)
+    sample_low_confidence: List[Dict[str, Any]] = Field(default_factory=list)
+    sample_outliers: List[Dict[str, Any]] = Field(default_factory=list)
+    boundary_summary: Dict[str, Any] = Field(default_factory=dict)
+    split_summary: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelReviewResult(BaseModel):
+    assessment: ModelReviewAssessment = ModelReviewAssessment.REVIEW_MANUALLY
+    confidence: float = 0.0
+    reason: str = ""
+    blocking_factors: List[str] = Field(default_factory=list)
+    recommended_actions: List[ModelReviewAction] = Field(default_factory=list)
+    safe_to_promote: bool = False
+    source: str = "openai"
+    summary: Optional[ModelReviewSummary] = None
+
+
+class ModelReviewComparison(BaseModel):
+    workflow_id: str
+    before_workflow_id: str
+    after_workflow_id: str
+    before: ModelReviewSummary
+    after: ModelReviewSummary
+    deltas: Dict[str, Any] = Field(default_factory=dict)
+    applied_actions: List[ModelReviewAction] = Field(default_factory=list)
+    accepted: bool = False
+
+
+class ModelReviewProposalListResponse(BaseModel):
+    workflow_id: str
+    proposals: List[ModelReviewAction] = Field(default_factory=list)
+
+
+class ModelReviewRerunRequest(BaseModel):
+    proposal_ids: List[str] = Field(default_factory=list)
+
+
 class BoundaryAxisRange(BaseModel):
     label: str
     minimum: float

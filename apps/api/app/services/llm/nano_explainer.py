@@ -179,6 +179,33 @@ def review_job_summary(summary: dict[str, Any], force_fallback: bool = False) ->
     return parsed
 
 
+def review_model_workflow_summary(summary: dict[str, Any], force_fallback: bool = False) -> dict[str, Any]:
+    if force_fallback:
+        parsed = _fallback_model_review(summary)
+        parsed.setdefault("source", "fallback")
+        return parsed
+
+    parsed = call_azure_openai_json(
+        system_prompt=(
+            "あなたは学習後のモデルレビュー担当です。出力は JSON のみ。日本語で簡潔に。"
+            "JSON 形式は次の形に厳密に従う: "
+            "{\"assessment\":\"needs_improvement\",\"confidence\":0.74,\"reason\":\"...\",\"blocking_factors\":[\"...\"],\"recommended_actions\":[{\"action\":\"rebalance_classes\",\"target\":\"label_column\",\"reason\":\"...\",\"expected_effect\":\"...\",\"safe_to_apply\":true,\"params\":{}}],\"safe_to_promote\":false}. "
+            "assessment は pass / needs_improvement / reject / review_manually / needs_more_data のいずれか。"
+            "confidence は 0 から 1 の数値。"
+            "blocking_factors は最大 3 件の文字列配列。"
+            "recommended_actions は最大 3 件のオブジェクト配列で、各要素は action, target, reason, expected_effect, safe_to_apply, params を持つ。"
+            "action は adjust_decision_threshold / rebalance_classes / enable_stratified_split / increase_test_size / switch_algorithm / tune_hyperparameters / drop_leaky_features / normalize_features / adjust_contamination / adjust_cluster_count / adjust_dbscan_eps / switch_to_preview_mode / review_label_quality / collect_more_data のいずれか。"
+            "safe_to_promote は最終承認ではなく参考値。"
+        ),
+        user_payload=summary,
+        fallback=_fallback_model_review,
+        temperature=0.1,
+        max_completion_tokens=800,
+    )
+    parsed.setdefault("source", "openai" if is_configured() else "fallback")
+    return parsed
+
+
 def _parse_json_content(content: str) -> dict[str, Any] | None:
     text = content.strip()
     if text.startswith("```"):
@@ -319,5 +346,145 @@ def _fallback_review(summary: dict[str, Any]) -> dict[str, Any]:
         "recommended_actions": recommended_actions,
         "reason": "Azure OpenAI が利用できないため、ルールベースの暫定レビューを返しました。",
         "safe_to_apply": safe_to_apply,
+        "source": "fallback",
+    }
+
+
+def _fallback_model_review(summary: dict[str, Any]) -> dict[str, Any]:
+    use_case = str(summary.get("use_case", "")).lower()
+    metrics = summary.get("metrics", {}) or {}
+    quality_flags = [str(flag) for flag in summary.get("quality_flags", []) or []]
+    diagnostics = summary.get("diagnostics", {}) or {}
+    blocking_factors: list[str] = []
+    recommended_actions: list[dict[str, Any]] = []
+
+    if use_case == "classification":
+        accuracy = float(metrics.get("accuracy", 0.0) or 0.0)
+        balanced_accuracy = float(metrics.get("balanced_accuracy", 0.0) or 0.0)
+        confidence_mean = float(diagnostics.get("confidence_mean", metrics.get("confidence_mean", 0.0)) or 0.0)
+        train_test_gap = abs(float(diagnostics.get("train_accuracy", metrics.get("train_accuracy", 0.0)) or 0.0) - float(diagnostics.get("test_accuracy", metrics.get("test_accuracy", accuracy)) or accuracy))
+        if accuracy < 0.65:
+            blocking_factors.append("accuracy が低い")
+        if balanced_accuracy < 0.6:
+            blocking_factors.append("balanced accuracy が低い")
+        if confidence_mean and confidence_mean < 0.65:
+            blocking_factors.append("confidence が低い")
+        if train_test_gap > 0.15:
+            blocking_factors.append("train/test gap が大きい")
+            recommended_actions.append(
+                {
+                    "action": "increase_test_size",
+                    "target": "split_ratio",
+                    "reason": "評価分割を広げて過学習を確認する",
+                    "expected_effect": "汎化性能の把握精度向上",
+                    "safe_to_apply": True,
+                    "params": {"test_size": 0.3},
+                }
+            )
+        if "class_imbalance" in quality_flags:
+            blocking_factors.append("クラス不均衡がある")
+            recommended_actions.append(
+                {
+                    "action": "rebalance_classes",
+                    "target": "label_column",
+                    "reason": "少数クラスの取りこぼしを抑える",
+                    "expected_effect": "少数クラス recall の改善",
+                    "safe_to_apply": True,
+                    "params": {"class_weight": "balanced"},
+                }
+            )
+        if "low_confidence" in quality_flags:
+            recommended_actions.append(
+                {
+                    "action": "normalize_features",
+                    "target": "feature_columns",
+                    "reason": "特徴量のスケール差を抑える",
+                    "expected_effect": "confidence の安定化",
+                    "safe_to_apply": True,
+                    "params": {"normalization": "standard"},
+                }
+            )
+        assessment = "pass"
+        if blocking_factors:
+            assessment = "needs_improvement"
+        if accuracy < 0.5 and balanced_accuracy < 0.5:
+            assessment = "reject"
+        if summary.get("row_count", 0) < 30:
+            assessment = "needs_more_data"
+    elif use_case == "prediction":
+        r2 = float(metrics.get("r2", 0.0) or 0.0)
+        mae = float(metrics.get("mae", 0.0) or 0.0)
+        rmse = float(metrics.get("rmse", 0.0) or 0.0)
+        residual_mean = float(diagnostics.get("residual_mean", metrics.get("residual_mean", 0.0)) or 0.0)
+        residual_std = float(diagnostics.get("residual_std", metrics.get("residual_std", 0.0)) or 0.0)
+        if r2 < 0.3:
+            blocking_factors.append("R2 が低い")
+        if mae > 0 and rmse > 0 and rmse > mae * 1.25:
+            blocking_factors.append("誤差が大きい")
+        if abs(residual_mean) > max(1e-6, residual_std * 0.25):
+            blocking_factors.append("残差に偏りがある")
+        if "train_test_gap" in quality_flags:
+            recommended_actions.append(
+                {
+                    "action": "increase_test_size",
+                    "target": "split_ratio",
+                    "reason": "検証条件を厳しくして汎化を確認する",
+                    "expected_effect": "評価信頼性の向上",
+                    "safe_to_apply": True,
+                    "params": {"test_size": 0.3},
+                }
+            )
+        if "low_r2" in quality_flags or "high_error" in quality_flags:
+            recommended_actions.append(
+                {
+                    "action": "switch_algorithm",
+                    "target": "model",
+                    "reason": "別アルゴリズムで誤差構造が改善する可能性がある",
+                    "expected_effect": "予測誤差の削減",
+                    "safe_to_apply": True,
+                    "params": {"algorithm": "gradient_boosting"},
+                }
+            )
+        assessment = "pass"
+        if blocking_factors:
+            assessment = "needs_improvement"
+        if r2 < 0.0 and mae > 0:
+            assessment = "reject"
+        if summary.get("row_count", 0) < 30:
+            assessment = "needs_more_data"
+    else:
+        assessment = "review_manually"
+        blocking_factors.append("use case が未対応")
+        recommended_actions.append(
+            {
+                "action": "collect_more_data",
+                "target": "workflow",
+                "reason": "自動判定より先にデータ条件を見直す",
+                "expected_effect": "判断材料の増加",
+                "safe_to_apply": False,
+                "params": {},
+            }
+        )
+
+    if not recommended_actions and blocking_factors:
+        recommended_actions.append(
+            {
+                "action": "review_label_quality" if use_case in {"classification", "prediction"} else "collect_more_data",
+                "target": "workflow",
+                "reason": "自動適用より人間確認を優先する",
+                "expected_effect": "誤適用の回避",
+                "safe_to_apply": False,
+                "params": {},
+            }
+        )
+
+    safe_to_promote = assessment == "pass" and not blocking_factors
+    return {
+        "assessment": assessment,
+        "confidence": 0.82 if blocking_factors else 0.9,
+        "reason": "Azure OpenAI が利用できないため、ルールベースの暫定レビューを返しました。",
+        "blocking_factors": blocking_factors,
+        "recommended_actions": recommended_actions,
+        "safe_to_promote": safe_to_promote,
         "source": "fallback",
     }

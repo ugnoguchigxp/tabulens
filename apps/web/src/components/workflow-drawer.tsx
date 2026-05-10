@@ -5,36 +5,14 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { Bot, Database, Filter, Sparkles, X } from 'lucide-react';
-
-type ColumnLike = {
-  name: string;
-  inferred_type?: string;
-};
-
-type SheetLike = {
-  name: string;
-  row_count?: number;
-  columns: ColumnLike[];
-};
+import { useWorkflowSettings, type ColumnLike, type MappingLike, type WorkflowSettingsLike } from '@/hooks/use-workflow-settings';
 
 type WorkbookLike = {
-  sheets: SheetLike[];
-};
-
-type MappingLike = {
-  feature_columns: string[];
-  label_column: string;
-  id_column: string;
-  user_id_column?: string;
-  item_id_column?: string;
-  rating_column?: string;
-  timestamp_column?: string;
-};
-
-type WorkflowSettingsLike = {
-  use_case: 'classification' | 'prediction' | 'anomaly_detection' | 'recommendation' | 'clustering' | 'noise_reduction';
-  algorithm: string;
-  params: Record<string, any>;
+  sheets: {
+    name: string;
+    row_count?: number;
+    columns: ColumnLike[];
+  }[];
 };
 
 type WorkflowDrawerProps = {
@@ -82,40 +60,8 @@ function isNumericColumn(column: ColumnLike) {
   return /(int|float|double|number|numeric|decimal|real)/i.test(column.inferred_type ?? '');
 }
 
-function getUseCaseDefaults(useCase: string) {
-  if (useCase === 'classification') {
-    return {
-      algorithm: 'random_forest',
-      params: { task_type: 'classification', split_mode: 'ratio', train_size: 0.8, test_size: 0.2, random_state: 42 },
-    };
-  }
-  if (useCase === 'prediction') {
-    return {
-      algorithm: 'random_forest',
-      params: { task_type: 'regression', split_mode: 'ratio', train_size: 0.8, test_size: 0.2, random_state: 42 },
-    };
-  }
-  if (useCase === 'anomaly_detection') {
-    return { algorithm: 'isolation_forest', params: { contamination: 0.1 } };
-  }
-  if (useCase === 'recommendation') {
-    return { algorithm: 'popularity_baseline', params: { top_k: 5 } };
-  }
-  if (useCase === 'clustering') {
-    return { algorithm: 'kmeans', params: { cluster_count: 3, eps: 0.8, min_samples: 5 } };
-  }
-  if (useCase === 'noise_reduction') {
-    return { algorithm: 'isolation_forest', params: { apply_mode: 'preview', contamination: 0.1, missing_row_threshold: 0.5 } };
-  }
-  return getUseCaseDefaults('classification');
-}
-
 function getCurrentColumns(workbookData: WorkbookLike | undefined, selectedSheet: number) {
   return workbookData?.sheets[selectedSheet]?.columns ?? [];
-}
-
-function updateFeatureColumns(current: string[], column: string) {
-  return current.includes(column) ? current.filter((name) => name !== column) : [...current, column];
 }
 
 export function WorkflowDrawer({
@@ -134,12 +80,24 @@ export function WorkflowDrawer({
 }: WorkflowDrawerProps) {
   const activeSheet = workbookData?.sheets[selectedSheet];
   const columns = sourceColumns?.length ? sourceColumns : getCurrentColumns(workbookData, selectedSheet);
+  const rowCount = sourceRowCount ?? activeSheet?.row_count ?? 0;
+
+  const {
+    handleUseCaseChange,
+    handleAlgorithmChange,
+    handleParamChange,
+    handleSplitModeChange,
+    handleIdColumnChange,
+    handleLabelColumnChange,
+    toggleFeatureColumn,
+    handleMappingKeyChange,
+  } = useWorkflowSettings(mapping, setMapping, workflowSettings, setWorkflowSettings, rowCount);
+
   const useCase = workflowSettings.use_case || 'classification';
   const splitMode = (workflowSettings.params.split_mode ?? 'ratio') as 'ratio' | 'count';
   const algorithms = USE_CASE_ALGORITHMS[useCase] ?? USE_CASE_ALGORITHMS.classification;
   const labelColumn = columns.find((column) => column.name === mapping.label_column) ?? null;
   const labelIsCategorical = labelColumn ? !isNumericColumn(labelColumn) : false;
-  const rowCount = sourceRowCount ?? activeSheet?.row_count ?? 0;
 
   return (
     <div className="fixed inset-0 z-[120] flex justify-end bg-background/45 backdrop-blur-sm animate-in fade-in duration-200">
@@ -166,19 +124,7 @@ export function WorkflowDrawer({
                 <Label className="text-xs">Use Case</Label>
                 <select
                   value={useCase}
-                  onChange={(event) => {
-                    const nextUseCase = event.target.value as WorkflowSettingsLike['use_case'];
-                    const defaults = getUseCaseDefaults(nextUseCase);
-                    setWorkflowSettings((current) => ({
-                      ...current,
-                      use_case: nextUseCase,
-                      algorithm: defaults.algorithm,
-                      params: {
-                        ...current.params,
-                        ...defaults.params,
-                      },
-                    }));
-                  }}
+                  onChange={(event) => handleUseCaseChange(event.target.value as any)}
                   className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
                 >
                   <option value="classification">Classification</option>
@@ -194,7 +140,7 @@ export function WorkflowDrawer({
                 <Label className="text-xs">Algorithm</Label>
                 <select
                   value={workflowSettings.algorithm}
-                  onChange={(event) => setWorkflowSettings((current) => ({ ...current, algorithm: event.target.value }))}
+                  onChange={(event) => handleAlgorithmChange(event.target.value)}
                   className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
                 >
                   {algorithms.map((option) => (
@@ -223,7 +169,7 @@ export function WorkflowDrawer({
                 <Label className="text-xs">ID Column</Label>
                 <select
                   value={mapping.id_column}
-                  onChange={(event) => setMapping((current) => ({ ...current, id_column: event.target.value }))}
+                  onChange={(event) => handleIdColumnChange(event.target.value)}
                   className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
                 >
                   <option value="">None</option>
@@ -246,12 +192,7 @@ export function WorkflowDrawer({
                         <button
                           key={column.name}
                           disabled={isLabel}
-                          onClick={() => {
-                            setMapping((current) => ({
-                              ...current,
-                              feature_columns: updateFeatureColumns(current.feature_columns, column.name).filter((name) => name !== current.label_column),
-                            }));
-                          }}
+                          onClick={() => toggleFeatureColumn(column.name)}
                           className={cn(
                             'inline-flex items-center rounded-md border px-2 py-1 text-[10px] font-medium transition-all',
                             isLabel && 'cursor-not-allowed border-amber-300 bg-amber-50 text-amber-800',
@@ -275,14 +216,7 @@ export function WorkflowDrawer({
                   <Label className="text-xs">Label Column</Label>
                   <select
                     value={mapping.label_column}
-                    onChange={(event) => {
-                      const nextLabel = event.target.value;
-                      setMapping((current) => ({
-                        ...current,
-                        label_column: nextLabel,
-                        feature_columns: current.feature_columns.filter((feature) => feature !== nextLabel),
-                      }));
-                    }}
+                    onChange={(event) => handleLabelColumnChange(event.target.value)}
                     className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
                   >
                     <option value="">None</option>
@@ -318,12 +252,7 @@ export function WorkflowDrawer({
                       <Label className="text-xs">{label}</Label>
                       <select
                         value={(mapping as any)[key] ?? ''}
-                        onChange={(event) =>
-                          setMapping((current) => ({
-                            ...current,
-                            [key]: event.target.value,
-                          }))
-                        }
+                        onChange={(event) => handleMappingKeyChange(key, event.target.value)}
                         className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
                       >
                         <option value="">None</option>
@@ -378,12 +307,7 @@ export function WorkflowDrawer({
                       step={splitMode === 'count' ? 1 : 0.05}
                       min={splitMode === 'count' ? 1 : 0.05}
                       max={splitMode === 'count' ? Math.max(2, rowCount || 2) : 0.95}
-                      onChange={(value) =>
-                        setWorkflowSettings((current) => ({
-                          ...current,
-                          params: { ...current.params, train_size: value },
-                        }))
-                      }
+                      onChange={(value) => handleParamChange('train_size', value)}
                     />
                     <NumberInput
                       label="Test Size"
@@ -391,12 +315,7 @@ export function WorkflowDrawer({
                       step={splitMode === 'count' ? 1 : 0.05}
                       min={splitMode === 'count' ? 1 : 0.05}
                       max={splitMode === 'count' ? Math.max(2, rowCount || 2) : 0.95}
-                      onChange={(value) =>
-                        setWorkflowSettings((current) => ({
-                          ...current,
-                          params: { ...current.params, test_size: value },
-                        }))
-                      }
+                      onChange={(value) => handleParamChange('test_size', value)}
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -405,33 +324,13 @@ export function WorkflowDrawer({
                       value={workflowSettings.params.random_state ?? 42}
                       step={1}
                       min={0}
-                      onChange={(value) =>
-                        setWorkflowSettings((current) => ({
-                          ...current,
-                          params: { ...current.params, random_state: value },
-                        }))
-                      }
+                      onChange={(value) => handleParamChange('random_state', value)}
                     />
                     <div className="space-y-2">
                       <Label className="text-xs">Split Mode</Label>
                       <select
                         value={splitMode}
-                        onChange={(event) =>
-                          setWorkflowSettings((current) => {
-                            const nextSplitMode = event.target.value as 'ratio' | 'count';
-                            const countTrain = Math.max(1, Math.floor((rowCount || 10) * 0.8));
-                            const countTest = Math.max(1, (rowCount || 10) - countTrain);
-                            return {
-                              ...current,
-                              params: {
-                                ...current.params,
-                                split_mode: nextSplitMode,
-                                train_size: nextSplitMode === 'count' ? countTrain : 0.8,
-                                test_size: nextSplitMode === 'count' ? countTest : 0.2,
-                              },
-                            };
-                          })
-                        }
+                        onChange={(event) => handleSplitModeChange(event.target.value as any)}
                         className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
                       >
                         <option value="ratio">Ratio</option>
@@ -450,24 +349,14 @@ export function WorkflowDrawer({
                     step={0.01}
                     min={0.01}
                     max={0.5}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, contamination: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('contamination', value)}
                   />
                   <NumberInput
                     label="k for LOF"
                     value={workflowSettings.params.n_neighbors ?? 10}
                     step={1}
                     min={2}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, n_neighbors: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('n_neighbors', value)}
                   />
                 </div>
               )}
@@ -479,12 +368,7 @@ export function WorkflowDrawer({
                     value={workflowSettings.params.top_k ?? 5}
                     step={1}
                     min={1}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, top_k: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('top_k', value)}
                   />
                   <div className="space-y-2">
                     <Label className="text-xs">Baseline</Label>
@@ -502,36 +386,21 @@ export function WorkflowDrawer({
                     value={workflowSettings.params.cluster_count ?? 3}
                     step={1}
                     min={1}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, cluster_count: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('cluster_count', value)}
                   />
                   <NumberInput
                     label="DBSCAN eps"
                     value={workflowSettings.params.eps ?? 0.8}
                     step={0.05}
                     min={0.05}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, eps: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('eps', value)}
                   />
                   <NumberInput
                     label="Min Samples"
                     value={workflowSettings.params.min_samples ?? 5}
                     step={1}
                     min={2}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, min_samples: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('min_samples', value)}
                   />
                 </div>
               )}
@@ -544,12 +413,7 @@ export function WorkflowDrawer({
                     step={0.05}
                     min={0.05}
                     max={0.95}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, missing_row_threshold: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('missing_row_threshold', value)}
                   />
                   <NumberInput
                     label="Contamination"
@@ -557,23 +421,13 @@ export function WorkflowDrawer({
                     step={0.01}
                     min={0.01}
                     max={0.5}
-                    onChange={(value) =>
-                      setWorkflowSettings((current) => ({
-                        ...current,
-                        params: { ...current.params, contamination: value },
-                      }))
-                    }
+                    onChange={(value) => handleParamChange('contamination', value)}
                   />
                   <div className="space-y-2 col-span-2">
                     <Label className="text-xs">Apply Mode</Label>
                     <select
                       value={workflowSettings.params.apply_mode ?? 'preview'}
-                      onChange={(event) =>
-                        setWorkflowSettings((current) => ({
-                          ...current,
-                          params: { ...current.params, apply_mode: event.target.value },
-                        }))
-                      }
+                      onChange={(event) => handleParamChange('apply_mode', event.target.value)}
                       className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
                     >
                       <option value="preview">Preview</option>

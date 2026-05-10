@@ -132,7 +132,12 @@ def _run_prediction_workflow(df: pd.DataFrame, request: ModelWorkflowRequest, wo
     X_test_proc = preprocessor.transform(X_test)
     X_all_proc = preprocessor.transform(X)
 
-    model = build_model(request.algorithm, y_train, force_classification=task_type == "classification")
+    model = build_model(
+        request.algorithm,
+        y_train,
+        force_classification=task_type == "classification",
+        params=dict(request.params),
+    )
     model.fit(X_train_proc, y_train)
 
     all_predictions = model.predict(X_all_proc)
@@ -156,19 +161,23 @@ def _run_prediction_workflow(df: pd.DataFrame, request: ModelWorkflowRequest, wo
     }
 
     if task_type == "classification":
+        train_predictions = pd.Series(model.predict(X_train_proc), index=y_train.index)
         result_df["_predicted_class"] = all_predictions
         if hasattr(model, "predict_proba"):
             all_confidence = np.max(model.predict_proba(X_all_proc), axis=1)
             result_df["_prediction_confidence"] = all_confidence
             test_confidence = np.max(model.predict_proba(X_test_proc), axis=1)
+            train_confidence = np.max(model.predict_proba(X_train_proc), axis=1)
         else:
             result_df["_prediction_confidence"] = 1.0
             test_confidence = np.ones(len(X_test))
+            train_confidence = np.ones(len(X_train))
         result_df["_is_correct"] = result_df[label_column].astype(str) == result_df["_predicted_class"].astype(str)
         result_df["_error_flag"] = False
         result_df.loc[test_idx, "_error_flag"] = ~result_df.loc[test_idx, "_is_correct"]
 
         y_test_pred = pd.Series(model.predict(X_test_proc), index=y_test.index)
+        y_train_pred = train_predictions
         metrics = {
             "accuracy": float(accuracy_score(y_test.astype(str), y_test_pred.astype(str))),
             "balanced_accuracy": float(balanced_accuracy_score(y_test.astype(str), y_test_pred.astype(str))),
@@ -176,6 +185,17 @@ def _run_prediction_workflow(df: pd.DataFrame, request: ModelWorkflowRequest, wo
             "recall": float(recall_score(y_test.astype(str), y_test_pred.astype(str), average="weighted", zero_division=0)),
             "f1": float(f1_score(y_test.astype(str), y_test_pred.astype(str), average="weighted", zero_division=0)),
             "confidence_mean": float(np.mean(test_confidence)) if len(test_confidence) else 0.0,
+            "train_accuracy": float(accuracy_score(y_train.astype(str), y_train_pred.astype(str))),
+            "train_balanced_accuracy": float(balanced_accuracy_score(y_train.astype(str), y_train_pred.astype(str))),
+            "train_precision": float(precision_score(y_train.astype(str), y_train_pred.astype(str), average="weighted", zero_division=0)),
+            "train_recall": float(recall_score(y_train.astype(str), y_train_pred.astype(str), average="weighted", zero_division=0)),
+            "train_f1": float(f1_score(y_train.astype(str), y_train_pred.astype(str), average="weighted", zero_division=0)),
+            "train_confidence_mean": float(np.mean(train_confidence)) if len(train_confidence) else 0.0,
+            "test_accuracy": float(accuracy_score(y_test.astype(str), y_test_pred.astype(str))),
+            "test_balanced_accuracy": float(balanced_accuracy_score(y_test.astype(str), y_test_pred.astype(str))),
+            "test_precision": float(precision_score(y_test.astype(str), y_test_pred.astype(str), average="weighted", zero_division=0)),
+            "test_recall": float(recall_score(y_test.astype(str), y_test_pred.astype(str), average="weighted", zero_division=0)),
+            "test_f1": float(f1_score(y_test.astype(str), y_test_pred.astype(str), average="weighted", zero_division=0)),
             "confusion_matrix": _build_confusion_matrix(y_test.astype(str), y_test_pred.astype(str)),
             "train_count": int(len(train_idx)),
             "test_count": int(len(test_idx)),
@@ -195,10 +215,18 @@ def _run_prediction_workflow(df: pd.DataFrame, request: ModelWorkflowRequest, wo
 
         y_test_pred = pd.Series(model.predict(X_test_proc), index=y_test.index)
         y_test_actual = pd.to_numeric(y_test, errors="coerce")
+        y_train_pred = pd.Series(model.predict(X_train_proc), index=y_train.index)
+        y_train_actual = pd.to_numeric(y_train, errors="coerce")
         metrics = {
             "mae": float(mean_absolute_error(y_test_actual, y_test_pred)),
             "rmse": float(np.sqrt(np.mean((y_test_actual - y_test_pred) ** 2))),
             "r2": float(r2_score(y_test_actual, y_test_pred)),
+            "train_mae": float(mean_absolute_error(y_train_actual, y_train_pred)),
+            "train_rmse": float(np.sqrt(np.mean((y_train_actual - y_train_pred) ** 2))),
+            "train_r2": float(r2_score(y_train_actual, y_train_pred)),
+            "test_mae": float(mean_absolute_error(y_test_actual, y_test_pred)),
+            "test_rmse": float(np.sqrt(np.mean((y_test_actual - y_test_pred) ** 2))),
+            "test_r2": float(r2_score(y_test_actual, y_test_pred)),
             "residual_mean": float(np.nanmean(result_df.loc[test_idx, "_residual"])) if len(test_idx) else 0.0,
             "residual_std": float(np.nanstd(result_df.loc[test_idx, "_residual"])) if len(test_idx) else 0.0,
             "train_count": int(len(train_idx)),

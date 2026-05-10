@@ -2,12 +2,17 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import { RefreshCcw, Sparkles } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, RefreshCcw, Sparkles } from 'lucide-react';
 
 type WorkflowPanelProps = {
   workflowId: string;
   useCase: string;
   result: any | null;
+  reviewSummary?: any | null;
+  reviewResult?: any | null;
+  reviewProposalCount?: number;
+  onOpenReview?: () => void;
+  isReviewing?: boolean;
   onRefresh?: () => void;
   isRefreshing?: boolean;
   onDownloadModel?: () => void;
@@ -22,11 +27,27 @@ function formatValue(value: unknown) {
   return String(value);
 }
 
-export function WorkflowPanel({ workflowId, useCase, result, onRefresh, isRefreshing, onDownloadModel }: WorkflowPanelProps) {
+export function WorkflowPanel({
+  workflowId,
+  useCase,
+  result,
+  reviewSummary,
+  reviewResult,
+  reviewProposalCount = 0,
+  onOpenReview,
+  isReviewing,
+  onRefresh,
+  isRefreshing,
+  onDownloadModel,
+}: WorkflowPanelProps) {
   const metrics = result?.metrics?.values ?? result?.metrics ?? {};
   const metadata = result?.metadata ?? {};
   const rows = Array.isArray(result?.rows) ? result.rows : [];
   const canDownloadModel = Boolean(metadata?.model_artifact_available);
+  const assessment = reviewResult?.assessment ?? reviewSummary?.assessment ?? 'review_manually';
+  const confidence = typeof reviewResult?.confidence === 'number' ? reviewResult.confidence : 0;
+  const safeToPromote = Boolean(reviewResult?.safe_to_promote);
+  const blockingFactors: string[] = Array.isArray(reviewResult?.blocking_factors) ? reviewResult.blocking_factors : [];
 
   return (
     <aside className="flex h-full w-full xl:w-[390px] shrink-0 border-t xl:border-t-0 xl:border-l bg-slate-50/40 overflow-y-auto animate-in slide-in-from-right duration-200">
@@ -43,6 +64,42 @@ export function WorkflowPanel({ workflowId, useCase, result, onRefresh, isRefres
             </Button>
           )}
         </div>
+
+        <Card className="shadow-sm">
+          <CardContent className="space-y-3 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <Badge className="gap-1.5">
+                {String(assessment) === 'pass' ? <CheckCircle2 className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
+                Model Review
+              </Badge>
+              <Badge variant="secondary" className="text-[10px]">{reviewProposalCount} proposals</Badge>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded-md border bg-white p-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Assessment</div>
+                <div className="mt-1 font-semibold">{String(assessment)}</div>
+              </div>
+              <div className="rounded-md border bg-white p-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Confidence</div>
+                <div className="mt-1 font-semibold">{confidence.toFixed(2)}</div>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Badge variant={safeToPromote ? 'default' : 'outline'} className="text-[10px]">
+                {safeToPromote ? 'safe to promote' : 'manual review'}
+              </Badge>
+              {blockingFactors.slice(0, 3).map((factor) => (
+                <Badge key={factor} variant="outline" className="text-[10px]">
+                  {factor}
+                </Badge>
+              ))}
+            </div>
+            <Button className="w-full gap-2" variant="secondary" onClick={onOpenReview} disabled={!onOpenReview || isReviewing}>
+              <Sparkles className="size-4" />
+              Review Model
+            </Button>
+          </CardContent>
+        </Card>
 
         <Card className="shadow-sm">
           <CardContent className="space-y-3 p-4">

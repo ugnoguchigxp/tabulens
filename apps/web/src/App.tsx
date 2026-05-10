@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { AgGridReact } from 'ag-grid-react'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-quartz.css'
-import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Wand2, Sparkles, Database, Filter, Gauge, ArrowDownNarrowWide, CheckSquare, Square, Maximize2, Play } from 'lucide-react'
+import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Sparkles, Database, Filter, Gauge, ArrowDownNarrowWide, Maximize2, Play } from 'lucide-react'
 import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community'
 
 ModuleRegistry.registerModules([AllCommunityModule])
@@ -10,9 +10,9 @@ ModuleRegistry.registerModules([AllCommunityModule])
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
-import { Card, CardContent } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { BoundaryExplorer } from '@/components/boundary-explorer'
+import { ModelReviewModal } from '@/components/model-review-modal'
 import { ReviewPanel } from '@/components/review-panel'
 import { WorkflowDrawer } from '@/components/workflow-drawer'
 import { WorkflowPanel } from '@/components/workflow-panel'
@@ -28,116 +28,37 @@ import {
   useJobCompare,
   useJobBoundary,
   useWorkflowBoundary,
+  useWorkflowReviewSummary,
+  useWorkflowReviewResult,
+  useWorkflowReviewProposals,
+  useReviewModelWorkflow,
+  useDiscardWorkflowReviewProposal,
+  useRerunWorkflowReview,
   useReviewJob,
   useApplyProposal,
   useDiscardProposal,
 } from '@/hooks/use-tabulens'
+import { useGridEditor } from '@/hooks/use-grid-editor'
+import { PrepareDrawer } from '@/components/prepare-drawer'
 
-type WorkbookColumn = {
-  name: string
-  inferred_type: string
-  missing_count: number
-}
-
-type WorkbookSheet = {
-  name: string
-  row_count: number
-  columns: WorkbookColumn[]
-  rows?: Array<Record<string, unknown>>
-  preview_rows: Array<Record<string, unknown>>
-}
-
+import {
+  isNumericColumn,
+  suggestMapping,
+  inferColumnsFromRows,
+  createDefaultWorkflowSettings
+} from '@/lib/workbook-utils'
+import type {
+  WorkbookColumn,
+  WorkbookSheet,
+  ColumnMapping,
+  WorkflowSettings
+} from '@/lib/workbook-utils'
 type WorkbookUploadResponse = {
   workbook_id: string
   sheets: WorkbookSheet[]
 }
 
 type GridRow = Record<string, unknown>
-
-interface ColumnMapping {
-  feature_columns: string[]
-  label_column: string
-  id_column: string
-  user_id_column?: string
-  item_id_column?: string
-  rating_column?: string
-  timestamp_column?: string
-}
-
-type WorkflowUseCase = 'classification' | 'prediction' | 'anomaly_detection' | 'recommendation' | 'clustering' | 'noise_reduction'
-
-type WorkflowSettings = {
-  use_case: WorkflowUseCase
-  algorithm: string
-  params: Record<string, any>
-}
-
-interface ContextMenuState {
-  x: number; y: number; visible: boolean; rowIndex: number | null; colId: string | null
-}
-
-const NUMERIC_TYPE_PATTERN = /(int|float|double|number|numeric|decimal|real)/i
-const LABEL_HINT_PATTERN = /(^|_)(label|class|target|segment|group|category)(_|$)/i
-const ID_HINT_PATTERN = /(^|_)(id|uuid|key)(_|$)/i
-
-function isNumericColumn(column: WorkbookColumn) {
-  return NUMERIC_TYPE_PATTERN.test(column.inferred_type)
-}
-
-function suggestMapping(sheet: WorkbookSheet): ColumnMapping {
-  const columns = sheet.columns ?? []
-  const idCandidate = columns.find((column) => ID_HINT_PATTERN.test(column.name))?.name ?? ''
-  const categoricalColumns = columns.filter((column) => !isNumericColumn(column))
-  const labelCandidate =
-    columns.find((column) => LABEL_HINT_PATTERN.test(column.name))?.name ??
-    (categoricalColumns.length === 1 ? categoricalColumns[0]?.name ?? '' : '')
-
-  const feature_columns = columns
-    .filter((column) => isNumericColumn(column))
-    .map((column) => column.name)
-    .filter((name) => name !== idCandidate && name !== labelCandidate)
-
-  return {
-    id_column: idCandidate,
-    label_column: labelCandidate,
-    feature_columns,
-  }
-}
-
-function inferColumnsFromRows(rows: GridRow[]): WorkbookColumn[] {
-  const firstRow = rows[0]
-  if (!firstRow) return []
-  return Object.keys(firstRow).map((name) => {
-    const sample = rows.find((row) => row[name] !== null && row[name] !== undefined)?.[name]
-    return {
-      name,
-      inferred_type: typeof sample === 'number' ? 'float64' : typeof sample === 'boolean' ? 'bool' : 'object',
-      missing_count: rows.filter((row) => row[name] === null || row[name] === undefined || row[name] === '').length,
-    }
-  })
-}
-
-function createDefaultWorkflowSettings(): WorkflowSettings {
-  return {
-    use_case: 'classification',
-    algorithm: 'random_forest',
-    params: {
-      task_type: 'classification',
-      split_mode: 'ratio',
-      train_size: 0.8,
-      test_size: 0.2,
-      random_state: 42,
-      contamination: 0.1,
-      n_neighbors: 10,
-      cluster_count: 3,
-      eps: 0.8,
-      min_samples: 5,
-      top_k: 5,
-      apply_mode: 'preview',
-      missing_row_threshold: 0.5,
-    },
-  }
-}
 
 function App() {
   const [selectedSheet, setSelectedSheet] = useState<number>(0)
@@ -151,11 +72,25 @@ function App() {
   const [showWorkflowPanel, setShowWorkflowPanel] = useState(true)
   const [showWorkflowDrawer, setShowWorkflowDrawer] = useState(false)
   const [showBoundaryModal, setShowBoundaryModal] = useState(false)
+  const [showModelReviewModal, setShowModelReviewModal] = useState(false)
   const [showAnalysisDrawer, setShowAnalysisDrawer] = useState(false)
-  const [localRowData, setLocalRowData] = useState<GridRow[]>([])
-  const [extraColumns, setExtraColumns] = useState<string[]>([])
   const [proposalStatusById, setProposalStatusById] = useState<Record<string, 'applied' | 'discarded'>>({})
-  const [contextMenu, setContextMenu] = useState<ContextMenuState>({ x: 0, y: 0, visible: false, rowIndex: null, colId: null })
+  const [modelReviewComparison, setModelReviewComparison] = useState<any | null>(null)
+
+  const {
+    localRowData,
+    setLocalRowData,
+    extraColumns,
+    contextMenu,
+    setContextMenu,
+    closeContextMenu,
+    handleInsertRow,
+    handleDeleteRow,
+    handleInsertColumn,
+    handleDeleteColumn,
+    handleClearCell,
+    columnKeys,
+  } = useGridEditor([])
   
   // Analysis Settings State
   const [analysisSettings, setAnalysisSettings] = useState({
@@ -185,9 +120,15 @@ function App() {
   const { data: proposals } = useJobProposals(activeJobId)
   const { data: comparison } = useJobCompare(activeJobId)
   const { data: boundary, isLoading: boundaryLoading, error: boundaryError } = useJobBoundary(activeJobId)
+  const { data: workflowReviewSummary } = useWorkflowReviewSummary(activeWorkflowId)
+  const { data: workflowReviewResult } = useWorkflowReviewResult(activeWorkflowId)
+  const { data: workflowReviewProposals } = useWorkflowReviewProposals(activeWorkflowId)
   const reviewMutation = useReviewJob(activeJobId)
   const applyProposalMutation = useApplyProposal(activeJobId)
   const discardProposalMutation = useDiscardProposal(activeJobId)
+  const reviewModelMutation = useReviewModelWorkflow(activeWorkflowId)
+  const discardWorkflowProposalMutation = useDiscardWorkflowReviewProposal(activeWorkflowId)
+  const rerunWorkflowReviewMutation = useRerunWorkflowReview(activeWorkflowId)
   const {
     data: workflowBoundary,
     isLoading: workflowBoundaryLoading,
@@ -199,6 +140,7 @@ function App() {
   const selectedFeatures = Array.isArray(jobMetadata?.selected_features) ? (jobMetadata.selected_features as string[]) : []
   const droppedFeatures = Array.isArray(jobMetadata?.dropped_features) ? (jobMetadata.dropped_features as string[]) : []
   const proposalItems = Array.isArray(proposals?.proposals) ? proposals.proposals : []
+  const workflowProposalItems = Array.isArray(workflowReviewProposals?.proposals) ? workflowReviewProposals.proposals : []
   const activeSheet = workbookData?.sheets[selectedSheet]
   const sourceRowCount = activeSheet?.row_count ?? 0
   const processedRowCount = activeWorkflowId
@@ -273,6 +215,7 @@ function App() {
           setActiveWorkflowId(null)
           setJobMetadata(null)
           setWorkflowResult(null)
+          setModelReviewComparison(null)
           setSelectedSheet(0)
           setShowReviewPanel(true)
           setShowWorkflowPanel(true)
@@ -297,6 +240,7 @@ function App() {
         setActiveJobId(data.job_id)
         setActiveWorkflowId(null)
         setWorkflowResult(null)
+        setModelReviewComparison(null)
         setJobMetadata(data.metadata)
         const selected = Array.isArray(data.metadata?.selected_features) ? data.metadata.selected_features : []
         if (selected.length > 0) {
@@ -351,6 +295,8 @@ function App() {
         setShowWorkflowDrawer(false)
         setShowWorkflowPanel(true)
         setShowReviewPanel(false)
+        setShowModelReviewModal(false)
+        setModelReviewComparison(null)
         if (Array.isArray(data.rows)) {
           setLocalRowData(data.rows)
         }
@@ -391,55 +337,48 @@ function App() {
     })
   }, [discardProposalMutation])
 
+  const handleReviewModel = useCallback(() => {
+    if (!activeWorkflowId) return
+    reviewModelMutation.mutate(undefined, {
+      onSuccess: () => setShowModelReviewModal(true),
+    })
+  }, [activeWorkflowId, reviewModelMutation])
+
+  const handleDiscardWorkflowProposal = useCallback((proposalId: string) => {
+    discardWorkflowProposalMutation.mutate(proposalId)
+  }, [discardWorkflowProposalMutation])
+
+  const handleApplyAndRerunWorkflowProposal = useCallback((proposalId: string) => {
+    if (!activeWorkflowId) return
+    rerunWorkflowReviewMutation.mutate([proposalId], {
+      onSuccess: async (comparisonResult: any) => {
+        setModelReviewComparison(comparisonResult)
+        const nextWorkflowId = comparisonResult?.after_workflow_id
+        if (!nextWorkflowId) return
+        setActiveWorkflowId(String(nextWorkflowId))
+        try {
+          const nextWorkflow = await apiClient.getModelWorkflow(String(nextWorkflowId))
+          setWorkflowResult(nextWorkflow)
+        } catch {
+          // Keep the current result state if the rerun payload cannot be fetched yet.
+        }
+      },
+    })
+  }, [activeWorkflowId, rerunWorkflowReviewMutation])
+
   const onCellContextMenu = useCallback((params: any) => {
     params.event.preventDefault(); params.event.stopPropagation();
     setContextMenu({ x: params.event.clientX, y: params.event.clientY, visible: true, rowIndex: params.node.rowIndex, colId: params.column.colId })
   }, [])
 
-  const closeContextMenu = useCallback(() => setContextMenu(prev => ({ ...prev, visible: false })), [])
+  const closeContextMenuAndExtra = useCallback(() => closeContextMenu(), [closeContextMenu])
   useEffect(() => {
-    window.addEventListener('click', closeContextMenu)
-    return () => window.removeEventListener('click', closeContextMenu)
-  }, [closeContextMenu])
+    window.addEventListener('click', closeContextMenuAndExtra)
+    return () => window.removeEventListener('click', closeContextMenuAndExtra)
+  }, [closeContextMenuAndExtra])
 
-  const handleInsertRow = (offset: number) => {
-    if (contextMenu.rowIndex === null) return
-    const newRow: GridRow = {}
-    Object.keys(localRowData[0] ?? {}).forEach(k => {
-      newRow[k] = null
-    })
-    const newData = [...localRowData]
-    newData.splice(contextMenu.rowIndex + offset, 0, newRow)
-    setLocalRowData(newData); closeContextMenu()
-  }
 
-  const handleDeleteRow = () => {
-    if (contextMenu.rowIndex === null) return
-    const newData = [...localRowData]; newData.splice(contextMenu.rowIndex, 1)
-    setLocalRowData(newData); closeContextMenu()
-  }
-
-  const handleInsertColumn = () => {
-    const colName = prompt("Enter column name:")
-    if (colName) {
-      setExtraColumns([...extraColumns, colName])
-      setLocalRowData(localRowData.map(row => ({ ...row, [colName]: null })))
-    }
-    closeContextMenu()
-  }
-
-  const handleDeleteColumn = () => {
-    if (!contextMenu.colId) return
-    setLocalRowData(localRowData.map(row => { const nr = { ...row }; delete nr[contextMenu.colId!]; return nr }))
-    setExtraColumns(extraColumns.filter(c => c !== contextMenu.colId)); closeContextMenu()
-  }
-
-  const columnKeys = useMemo(() => {
-    if (localRowData.length > 0) {
-      return Object.keys(localRowData[0])
-    }
-    return []
-  }, [localRowData.length > 0 ? Object.keys(localRowData[0]).join(',') : ''])
+  const columnKeysList = columnKeys;
 
   const columnDefs = useMemo(() => {
     const baseCols: any[] = [{
@@ -448,11 +387,10 @@ function App() {
       suppressNavigable: true, sortable: false,
     }]
     
-    if (columnKeys.length > 0) {
-      baseCols.push(...columnKeys.map((key: string) => ({
+    if (columnKeysList.length > 0) {
+      baseCols.push(...columnKeysList.map((key: string) => ({
         field: key, headerName: key, flex: 1, minWidth: 150,
         cellClass: (params: any) => {
-          // Use params.colDef.field for better performance in cellClass
           const field = params.colDef.field;
           if (field.startsWith('norm_')) return 'bg-blue-50/30'
           if (field.startsWith('_')) return 'bg-green-50/50 font-semibold text-green-700'
@@ -462,7 +400,7 @@ function App() {
       })))
     }
     return baseCols
-  }, [columnKeys, extraColumns])
+  }, [columnKeysList, extraColumns])
 
   return (
     <div className="flex h-screen flex-col bg-background overflow-hidden relative">
@@ -477,125 +415,20 @@ function App() {
           <button className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent" onClick={handleInsertColumn}><Columns className="size-3" /> Insert Column</button>
           <button className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-destructive hover:bg-destructive/10" onClick={handleDeleteColumn}><Trash2 className="size-3" /> Delete Column</button>
           <div className="my-1 h-px bg-border" />
-          <button className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent" onClick={() => { if (contextMenu.rowIndex !== null && contextMenu.colId) { const nd = [...localRowData]; nd[contextMenu.rowIndex][contextMenu.colId] = null; setLocalRowData(nd) }; closeContextMenu() }}><Eraser className="size-3" /> Clear Contents</button>
+          <button className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-accent" onClick={handleClearCell}><Eraser className="size-3" /> Clear Contents</button>
         </div>
       )}
 
       {/* Prepare Drawer */}
       {showAnalysisDrawer && (
-        <div className="fixed inset-0 z-[110] flex justify-end bg-background/40 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="w-[450px] bg-background border-l shadow-2xl h-full flex flex-col animate-in slide-in-from-right duration-300">
-            <div className="flex items-center justify-between p-6 border-b">
-              <div className="flex items-center gap-3">
-                <div className="bg-primary/10 p-2 rounded-full"><Wand2 className="size-6 text-primary" /></div>
-                <div>
-                  <h2 className="text-xl font-bold">Prepare Dataset</h2>
-                  <p className="text-xs text-muted-foreground">Clean data and optimize columns before training</p>
-                </div>
-              </div>
-              <Button variant="ghost" size="icon" onClick={() => setShowAnalysisDrawer(false)}><X className="size-5" /></Button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-6 space-y-8">
-              {/* Data Cleansing Section */}
-              <section className={cn("space-y-4 transition-opacity", !analysisSettings.run_cleansing && "opacity-50")}>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                    <Database className="size-4" /> 1. Data Cleansing
-                  </div>
-                  <button 
-                    onClick={() => setAnalysisSettings({...analysisSettings, run_cleansing: !analysisSettings.run_cleansing})}
-                    className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-primary hover:bg-primary/5 px-2 py-1 rounded"
-                  >
-                    {analysisSettings.run_cleansing ? <CheckSquare className="size-4" /> : <Square className="size-4" />}
-                    {analysisSettings.run_cleansing ? "Enabled" : "Disabled"}
-                  </button>
-                </div>
-                <Card className="border-slate-200 shadow-sm overflow-hidden">
-                  <CardContent className="p-4 space-y-4">
-                    <div className="space-y-2">
-                      <Label className="text-xs">Handle Missing Values</Label>
-                      <select 
-                        disabled={!analysisSettings.run_cleansing}
-                        value={analysisSettings.preprocessing.handle_missing}
-                        onChange={e => setAnalysisSettings({...analysisSettings, preprocessing: {...analysisSettings.preprocessing, handle_missing: e.target.value}})}
-                        className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs focus:ring-2 focus:ring-primary/20 transition-all disabled:opacity-50"
-                      >
-                        <option value="mean">Mean Imputation (Numeric)</option>
-                        <option value="median">Median Imputation</option>
-                        <option value="zero">Fill with Zero / Constant</option>
-                        <option value="drop">Drop Rows with Missing Data</option>
-                      </select>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label className="text-xs">Feature Scaling</Label>
-                      <select 
-                        disabled={!analysisSettings.run_cleansing}
-                        value={analysisSettings.preprocessing.normalization}
-                        onChange={e => setAnalysisSettings({...analysisSettings, preprocessing: {...analysisSettings.preprocessing, normalization: e.target.value}})}
-                        className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs focus:ring-2 focus:ring-primary/20 transition-all disabled:opacity-50"
-                      >
-                        <option value="minmax">Min-Max Normalization (0-1)</option>
-                        <option value="standard">Standard Scaling (Z-score)</option>
-                        <option value="none">None (Raw Data)</option>
-                      </select>
-                    </div>
-                  </CardContent>
-                </Card>
-              </section>
-
-              {/* Feature Selection Section */}
-              <section className={cn("space-y-4 transition-opacity", !analysisSettings.run_feature_selection && "opacity-50")}>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                    <Filter className="size-4" /> 2. Feature Selection
-                  </div>
-                  <button 
-                    onClick={() => setAnalysisSettings({...analysisSettings, run_feature_selection: !analysisSettings.run_feature_selection})}
-                    className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-primary hover:bg-primary/5 px-2 py-1 rounded"
-                  >
-                    {analysisSettings.run_feature_selection ? <CheckSquare className="size-4" /> : <Square className="size-4" />}
-                    {analysisSettings.run_feature_selection ? "Enabled" : "Disabled"}
-                  </button>
-                </div>
-                <Card className="border-slate-200 shadow-sm">
-                  <CardContent className="p-4 space-y-4">
-                    <div className="space-y-2">
-                      <Label className="text-xs flex justify-between">
-                        Importance Threshold 
-                        <span className="text-primary font-bold">{(analysisSettings.preprocessing.feature_selection_threshold || 0).toFixed(2)}</span>
-                      </Label>
-                      <input 
-                        disabled={!analysisSettings.run_feature_selection}
-                        type="range" min="0" max="0.5" step="0.01"
-                        value={analysisSettings.preprocessing.feature_selection_threshold || 0}
-                        onChange={e => setAnalysisSettings({...analysisSettings, preprocessing: {...analysisSettings.preprocessing, feature_selection_threshold: parseFloat(e.target.value)}})}
-                        className="w-full accent-primary disabled:opacity-50"
-                      />
-                      <p className="text-[10px] text-muted-foreground italic">Calculates feature importance and marks weak columns before workflow training.</p>
-                    </div>
-                  </CardContent>
-                </Card>
-              </section>
-            </div>
-
-            <div className="p-6 border-t bg-slate-50">
-              <Button 
-                className="w-full h-12 text-lg gap-3 shadow-lg" 
-                onClick={handleRunAnalysis}
-                disabled={analysisMutation.isPending || mapping.feature_columns.length === 0}
-              >
-                {analysisMutation.isPending ? 'Preparing Dataset...' : (
-                  <>
-                    <Sparkles className="size-5" />
-                    Run Prepare
-                  </>
-                )}
-              </Button>
-            </div>
-          </div>
-        </div>
+        <PrepareDrawer
+          settings={analysisSettings}
+          setSettings={setAnalysisSettings}
+          onClose={() => setShowAnalysisDrawer(false)}
+          onRun={handleRunAnalysis}
+          isPending={analysisMutation.isPending}
+          canRun={mapping.feature_columns.length > 0}
+        />
       )}
 
       {showWorkflowDrawer && workbookData && (
@@ -631,6 +464,7 @@ function App() {
                 setActiveWorkflowId(null)
                 setJobMetadata(null)
                 setWorkflowResult(null)
+                setModelReviewComparison(null)
                 if (workbookData?.sheets[nextSheet]) {
                   setMapping(suggestMapping(workbookData.sheets[nextSheet]))
                 }
@@ -922,8 +756,13 @@ function App() {
               workflowId={activeWorkflowId}
               useCase={workflowResult?.use_case ?? workflowSettings.use_case}
               result={workflowResult}
+              reviewSummary={workflowReviewSummary}
+              reviewResult={workflowReviewResult}
+              reviewProposalCount={workflowProposalItems.length}
+              onOpenReview={() => setShowModelReviewModal(true)}
+              isReviewing={reviewModelMutation.isPending}
               onDownloadModel={() => {
-                void apiClient.exportModelArtifact(activeWorkflowId).then((url) => {
+                void apiClient.exportModelArtifact(activeWorkflowId).then((url: string) => {
                   window.location.href = url
                 })
               }}
@@ -1030,6 +869,22 @@ function App() {
           </div>
         </div>
       )}
+
+      <ModelReviewModal
+        open={showModelReviewModal && Boolean(activeWorkflowId)}
+        workflowId={activeWorkflowId ?? ''}
+        reviewSummary={workflowReviewSummary}
+        reviewResult={workflowReviewResult}
+        proposals={workflowProposalItems}
+        comparison={modelReviewComparison}
+        onClose={() => setShowModelReviewModal(false)}
+        onReview={handleReviewModel}
+        onDiscardProposal={handleDiscardWorkflowProposal}
+        onApplyAndRerun={handleApplyAndRerunWorkflowProposal}
+        isReviewing={reviewModelMutation.isPending}
+        isDiscarding={discardWorkflowProposalMutation.isPending}
+        isRerunning={rerunWorkflowReviewMutation.isPending}
+      />
     </div>
   )
 }

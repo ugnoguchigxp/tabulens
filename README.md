@@ -210,6 +210,7 @@ pnpm --dir apps/web build
 
 - [モデルワークフロー実装計画](docs/model-workflow-implementation-plan.md)
 - [分析レビュー実装計画](docs/analysis-review-implementation-plan.md)
+- [学習後レビュー実装計画](docs/model-review-implementation-plan.md)
 
 ## ライセンス方針
 
