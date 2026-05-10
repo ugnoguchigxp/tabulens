@@ -37,10 +37,16 @@ type ExplorationResult = {
     confidence: number
     reasons: string[]
     risk_flags: string[]
+    decision: {
+      primary_message: string
+      recommended_path: 'run_workflow' | 'adjust_features' | 'change_target' | 'collect_more_data' | 'inspect_data_quality' | 'use_baseline'
+      primary_blocker: string | null
+    }
     next_actions: Array<{
       action: string
       reason: string
       priority: 'high' | 'medium' | 'low'
+      affected_columns: string[]
     }>
   }
 }
@@ -137,6 +143,20 @@ export function ExplorationPanel({ result }: Props) {
         {evaluation && (
           <Card>
             <CardContent className="p-3 space-y-3 text-xs">
+              <div className="space-y-1 rounded border bg-white px-2 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Decision</span>
+                  <Badge variant="secondary" className="h-4 px-1 text-[9px]">
+                    {evaluation.decision.recommended_path}
+                  </Badge>
+                </div>
+                <p className="text-[11px] font-medium">{evaluation.decision.primary_message}</p>
+                {evaluation.decision.primary_blocker && (
+                  <p className="text-[10px] text-muted-foreground">
+                    blocker: <span className="font-mono">{evaluation.decision.primary_blocker}</span>
+                  </p>
+                )}
+              </div>
               <div className="flex items-center justify-between">
                 <span>Evaluation</span>
                 <Badge variant="outline">{evaluation.overall_verdict}</Badge>
@@ -196,6 +216,11 @@ export function ExplorationPanel({ result }: Props) {
                           </Badge>
                         </div>
                         <p className="mt-1 text-muted-foreground">{action.reason}</p>
+                        {action.affected_columns.length > 0 && (
+                          <p className="mt-1 text-muted-foreground">
+                            columns: <span className="font-mono">{action.affected_columns.join(', ')}</span>
+                          </p>
+                        )}
                       </div>
                     ))}
                   </div>

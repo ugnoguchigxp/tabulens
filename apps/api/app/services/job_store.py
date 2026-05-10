@@ -45,7 +45,6 @@ def load_job_state(job_id: str) -> dict[str, Any] | None:
             "result_path": str(legacy_csv if legacy_csv.exists() else legacy_xlsx),
             "result_xlsx_path": str(legacy_xlsx) if legacy_xlsx.exists() else None,
             "metadata": {},
-            "proposals": [],
         }
     return None
 

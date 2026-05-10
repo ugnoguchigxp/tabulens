@@ -7,7 +7,6 @@ from sklearn.decomposition import PCA
 from sklearn.inspection import permutation_importance
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-from app.services.llm.nano_explainer import explain_cluster, is_configured
 from app.services.ml.model_factory import build_model as _build_model
 
 
@@ -258,53 +257,43 @@ def run_analysis(
     result_df["_review_priority"] = review_priority
 
     nano_decisions: dict[str, dict[str, str]] = {}
-    if is_configured():
-        for label in sorted(set(cluster_labels)):
-            if label == -1:
-                continue
-            cluster_key = f"cluster_{label}"
-            if not bool(is_island.loc[cluster_series == label].any()):
-                continue
-            cluster_rows = X_model.loc[cluster_series == label]
-            if cluster_rows.empty:
-                continue
-            global_mean = X_model.mean(numeric_only=True)
-            cluster_mean = cluster_rows.mean(numeric_only=True)
-            feature_diffs = (
-                (cluster_mean - global_mean)
-                .abs()
-                .sort_values(ascending=False)
-                .head(3)
-            )
-            top_feature_differences = [
-                {
-                    "feature": feature,
-                    "cluster_mean": float(cluster_mean.get(feature, 0.0)),
-                    "global_mean": float(global_mean.get(feature, 0.0)),
-                }
-                for feature in feature_diffs.index
-            ]
-            representative_index = cluster_rows.index[0]
-            summary = {
-                "cluster_id": cluster_key,
-                "size": int(len(cluster_rows)),
-                "predicted_class": (
-                    cluster_major_class.get(label) if cluster_major_class else None
-                ),
-                "nearby_major_class": nearest_major_class[representative_index] if representative_index < len(nearest_major_class) else None,
-                "top_feature_differences": top_feature_differences,
-                "is_outlier": False,
-                "examples": [
-                    {
-                        "row_id": int(result_df.loc[representative_index, "_row_id"]),
-                        "values": {
-                            feature: float(cluster_rows.iloc[0].get(feature, 0.0))
-                            for feature in cluster_rows.columns[: min(3, len(cluster_rows.columns))]
-                        },
-                    }
-                ],
+    for label in sorted(set(cluster_labels)):
+        if label == -1:
+            continue
+        cluster_key = f"cluster_{label}"
+        if not bool(is_island.loc[cluster_series == label].any()):
+            continue
+        cluster_rows = X_model.loc[cluster_series == label]
+        if cluster_rows.empty:
+            continue
+        global_mean = X_model.mean(numeric_only=True)
+        cluster_mean = cluster_rows.mean(numeric_only=True)
+        feature_diffs = (
+            (cluster_mean - global_mean)
+            .abs()
+            .sort_values(ascending=False)
+            .head(3)
+        )
+        top_feature_differences = [
+            {
+                "feature": feature,
+                "cluster_mean": float(cluster_mean.get(feature, 0.0)),
+                "global_mean": float(global_mean.get(feature, 0.0)),
             }
-            nano_decisions[cluster_key] = explain_cluster(summary)
+            for feature in feature_diffs.index
+        ]
+        representative_index = cluster_rows.index[0]
+        summary = {
+            "cluster_id": cluster_key,
+            "size": int(len(cluster_rows)),
+            "predicted_class": (
+                cluster_major_class.get(label) if cluster_major_class else None
+            ),
+            "nearby_major_class": nearest_major_class[representative_index] if representative_index < len(nearest_major_class) else None,
+            "top_feature_differences": top_feature_differences,
+            "is_outlier": False,
+        }
+        nano_decisions[cluster_key] = _fallback_cluster_explanation(summary)
 
     result_df["_nano_decision"] = ""
     result_df["_nano_reason"] = ""
@@ -327,3 +316,26 @@ def run_analysis(
     metadata["nano_explanations"] = int(len(nano_decisions))
 
     return result_df, metadata
+
+
+def _fallback_cluster_explanation(summary: dict) -> dict[str, str]:
+    size = int(summary.get("size", 0) or 0)
+    top_features = summary.get("top_feature_differences", []) or []
+    feature_names = [str(item.get("feature")) for item in top_features if item.get("feature")]
+    if size <= 3:
+        return {
+            "decision": "likely_outlier",
+            "reason": "Small isolated cluster may be unstable for learning.",
+            "recommended_action": "review_manually",
+        }
+    if feature_names:
+        return {
+            "decision": "merge_with_nearest_cluster",
+            "reason": f"Cluster differs mainly on {', '.join(feature_names[:2])}.",
+            "recommended_action": "review_manually",
+        }
+    return {
+        "decision": "review_manually",
+        "reason": "Cluster needs manual inspection.",
+        "recommended_action": "review_manually",
+    }

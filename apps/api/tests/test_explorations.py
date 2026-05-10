@@ -48,6 +48,15 @@ def test_run_exploration_success(mock_load_sheet, mock_resolve_path):
     assert 0.0 <= body["evaluation"]["confidence"] <= 1.0
     assert isinstance(body["evaluation"]["risk_flags"], list)
     assert isinstance(body["evaluation"]["next_actions"], list)
+    assert "decision" in body["evaluation"]
+    assert body["evaluation"]["decision"]["recommended_path"] in {
+        "run_workflow",
+        "adjust_features",
+        "change_target",
+        "collect_more_data",
+        "inspect_data_quality",
+        "use_baseline",
+    }
 
 
 @patch("app.routers.explorations.resolve_workbook_path")
@@ -75,7 +84,38 @@ def test_run_exploration_without_label_returns_unknown_evaluation(mock_load_shee
     assert body["target_feasibility"]["target_kind"] == "unknown"
     assert body["evaluation"]["signal_strength"] == "unknown"
     assert body["evaluation"]["overall_verdict"] == "needs_better_target"
+    assert body["evaluation"]["decision"]["recommended_path"] == "change_target"
     assert "label_column_missing" in body["evaluation"]["risk_flags"]
+
+
+@patch("app.routers.explorations.resolve_workbook_path")
+@patch("app.routers.explorations.load_workbook_sheet")
+def test_run_exploration_risky_columns_are_in_next_actions(mock_load_sheet, mock_resolve_path):
+    mock_resolve_path.return_value = "/tmp/sample.csv"
+    mock_load_sheet.return_value = pd.DataFrame(
+        {
+            "f1": [1, None, None, None, None],
+            "f2": [0, 1, 0, 1, 0],
+            "target": ["A", "B", "A", "B", "A"],
+        }
+    )
+
+    payload = {
+        "workbook_id": "wb-3",
+        "sheet_name": "Sheet1",
+        "mapping": {
+            "label_column": "target",
+            "feature_columns": ["f1", "f2"],
+        },
+        "task_type": "classification",
+    }
+    response = client.post("/api/explorations/run", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    actions = body["evaluation"]["next_actions"]
+    exclude_action = next((item for item in actions if item["action"] == "exclude_risky_columns"), None)
+    assert exclude_action is not None
+    assert "f1" in exclude_action["affected_columns"]
 
 
 @patch("app.routers.explorations.resolve_workbook_path")

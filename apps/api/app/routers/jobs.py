@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from fastapi.responses import FileResponse
 from app.core.paths import RESULT_DIR, UPLOAD_DIR
 from app.models.schemas import BoundarySnapshot, JobRequest, JobResponse
 from app.services.job_store import load_job_state, save_job_state, save_result_artifacts
+from app.services.exploration_store import load_exploration_result
 from app.services.ml.boundary import build_boundary_snapshot
 from app.services.ml.classifier import run_analysis
 
@@ -107,6 +109,8 @@ async def export_job(job_id: str):
     path = Path(str(xlsx_path))
     if not path.exists():
         raise HTTPException(status_code=404, detail="Export file not found")
+    state = _get_job_state(job_id)
+    _write_prepare_export_with_evaluation(path, state)
     return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=f"{job_id}-analysis.xlsx")
 
 
@@ -156,3 +160,28 @@ def _load_source_df(file_path: Path, sheet_name: str) -> pd.DataFrame:
 def _dataframe_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     safe_df = df.replace([float("inf"), float("-inf")], pd.NA).where(pd.notna(df), None)
     return safe_df.to_dict(orient="records")
+
+
+def _write_prepare_export_with_evaluation(path: Path, state: dict[str, Any]) -> None:
+    try:
+        result_df = pd.read_excel(path)
+    except Exception:
+        return
+
+    exploration = load_exploration_result(str(state.get("workbook_id", "")), str(state.get("sheet_name", "")))
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        result_df.to_excel(writer, sheet_name="results", index=False)
+        if exploration and isinstance(exploration.get("evaluation"), dict):
+            evaluation = exploration["evaluation"]
+            rows = [
+                {"key": "overall_verdict", "value": evaluation.get("overall_verdict")},
+                {"key": "signal_strength", "value": evaluation.get("signal_strength")},
+                {"key": "model_viability", "value": evaluation.get("model_viability")},
+                {"key": "confidence", "value": evaluation.get("confidence")},
+                {"key": "risk_flags", "value": json.dumps(evaluation.get("risk_flags", []), ensure_ascii=False)},
+                {"key": "next_actions", "value": json.dumps(evaluation.get("next_actions", []), ensure_ascii=False)},
+                {"key": "decision", "value": json.dumps(evaluation.get("decision", {}), ensure_ascii=False)},
+            ]
+            pd.DataFrame(rows).to_excel(writer, sheet_name="evaluation", index=False)
+        else:
+            pd.DataFrame([{"key": "evaluation_not_available", "value": True}]).to_excel(writer, sheet_name="evaluation", index=False)

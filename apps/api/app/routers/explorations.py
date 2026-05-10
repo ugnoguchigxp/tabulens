@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.models.schemas import ExplorationRequest, ExplorationResponse
+from app.services.exploration_store import save_exploration_result
 from app.services.exploration import run_exploration
 from app.services.workbook_loader import load_workbook_sheet, resolve_workbook_path
 
@@ -17,7 +18,7 @@ async def run_exploration_api(request: ExplorationRequest):
     try:
         df = load_workbook_sheet(file_path, request.sheet_name)
         data_profile, target_feasibility, model_sweep, evaluation = run_exploration(df, request)
-        return ExplorationResponse(
+        response = ExplorationResponse(
             workbook_id=request.workbook_id,
             sheet_name=request.sheet_name,
             data_profile=data_profile,
@@ -25,6 +26,12 @@ async def run_exploration_api(request: ExplorationRequest):
             model_sweep=model_sweep,
             evaluation=evaluation,
         )
+        save_exploration_result(
+            workbook_id=request.workbook_id,
+            sheet_name=request.sheet_name,
+            payload=response.model_dump(mode="json"),
+        )
+        return response
     except HTTPException:
         raise
     except Exception as exc:

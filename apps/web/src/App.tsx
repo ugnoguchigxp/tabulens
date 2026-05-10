@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
+import { apiClient } from '@/lib/api-client'
 import { BoundaryExplorer } from '@/components/boundary-explorer'
 import { WorkflowDrawer } from '@/components/workflow-drawer'
 import { WorkflowPanel } from '@/components/workflow-panel'
@@ -61,6 +62,7 @@ function App() {
   const [showAnalysisDrawer, setShowAnalysisDrawer] = useState(false)
   const [explorationResult, setExplorationResult] = useState<any | null>(null)
   const [manuallyDroppedFeatures, setManuallyDroppedFeatures] = useState<string[]>([])
+  const [sheetPage, setSheetPage] = useState(0)
 
   const {
     localRowData,
@@ -130,6 +132,7 @@ function App() {
   const boundaryFeatureCount = mapping.feature_columns.filter((feature) => feature !== mapping.label_column).length
   const boundaryReady = !!mapping.label_column && selectedLabelIsCategorical && boundaryFeatureCount >= 2
   const workflowBoundaryReady = !!activeWorkflowId && workflowResult?.use_case === 'classification'
+  const workbookPreviewMode = !!workbookData && !activeJobId && !activeWorkflowId
   const allowDraftRowExtension = !resultRows && !activeWorkflowId
   const isProcessing = resultsLoading || analysisMutation.isPending || workflowMutation.isPending || explorationMutation.isPending
   const preparedSourceColumns = activeJobId ? inferColumnsFromRows(localRowData) : undefined
@@ -137,17 +140,42 @@ function App() {
   const activeBoundary = workflowBoundaryReady ? workflowBoundary : boundary
   const activeBoundaryLoading = workflowBoundaryReady ? workflowBoundaryLoading : boundaryLoading
   const activeBoundaryError = workflowBoundaryReady ? workflowBoundaryError : boundaryError
+  const totalWorkbookPages = Math.max(1, Math.ceil(sourceRowCount / 100))
 
   useEffect(() => {
-    if (resultRows) setLocalRowData(resultRows)
-    else if (activeWorkflowId && Array.isArray(workflowResult?.rows)) {
+    if (resultRows) {
+      setLocalRowData(resultRows)
+      return
+    }
+    if (activeWorkflowId && Array.isArray(workflowResult?.rows)) {
       setLocalRowData(workflowResult.rows)
+      return
     }
-    else if (workbookData) {
-      const sheet = workbookData.sheets[selectedSheet]
-      setLocalRowData(sheet.rows ?? sheet.preview_rows)
+    if (!workbookData) {
+      return
     }
-  }, [resultRows, activeWorkflowId, workflowResult, workbookData, selectedSheet])
+
+    const sheet = workbookData.sheets[selectedSheet]
+    setLocalRowData(sheet.preview_rows ?? [])
+
+    let isCancelled = false
+    const offset = sheetPage * 100
+    void apiClient
+      .getWorkbookRows(workbookData.workbook_id, sheet.name, offset, 100)
+      .then((response) => {
+        if (isCancelled) return
+        if (Array.isArray(response?.rows)) {
+          setLocalRowData(response.rows)
+        }
+      })
+      .catch(() => {
+        // keep preview rows when paged fetch fails
+      })
+
+    return () => {
+      isCancelled = true
+    }
+  }, [resultRows, activeWorkflowId, workflowResult, workbookData, selectedSheet, sheetPage, setLocalRowData])
 
   useEffect(() => {
     if (!activeJobId && !workflowBoundaryReady) setShowBoundaryModal(false)
@@ -305,7 +333,7 @@ function App() {
   const onCellContextMenu = useCallback((params: any) => {
     params.event.preventDefault(); params.event.stopPropagation();
     setContextMenu({ x: params.event.clientX, y: params.event.clientY, visible: true, rowIndex: params.node.rowIndex, colId: params.column.colId })
-  }, [])
+  }, [setContextMenu])
 
   const closeContextMenuAndExtra = useCallback(() => closeContextMenu(), [closeContextMenu])
   useEffect(() => {
@@ -396,6 +424,7 @@ function App() {
               <select value={selectedSheet} onChange={(e) => {
                 const nextSheet = Number(e.target.value)
                 setSelectedSheet(nextSheet)
+                setSheetPage(0)
                 setActiveJobId(null)
                 setActiveWorkflowId(null)
                 setJobMetadata(null)
@@ -652,8 +681,8 @@ function App() {
             {!workbookData && !uploadMutation.isPending ? (
               <div className="flex flex-1 flex-col items-center justify-center bg-slate-50/50">
                 <div className="rounded-full bg-white p-10 shadow-sm border mb-6 transition-transform hover:scale-105 duration-500"><TableIcon className="size-16 text-slate-200" /></div>
-                <h2 className="text-xl font-semibold mb-2 text-slate-700 tracking-tight">No Workbook Loaded</h2>
-                <p className="text-slate-400 mb-6 text-sm">Start by uploading an Excel or CSV file</p>
+                <h2 className="text-xl font-semibold mb-2 text-slate-700 tracking-tight">Local ML Feasibility Check</h2>
+                <p className="text-slate-400 mb-6 text-sm">Upload a local workbook to check whether it contains usable ML signal.</p>
               </div>
             ) : (
               <div className="flex-1 ag-theme-quartz relative" onContextMenu={e => e.preventDefault()}>
@@ -662,7 +691,7 @@ function App() {
                   ref={gridRef}
                   rowData={localRowData}
                   columnDefs={columnDefs}
-                  pagination={true}
+                  pagination={!workbookPreviewMode}
                   paginationPageSize={100}
                   // Virtualization & Performance
                   rowBuffer={20}
@@ -740,6 +769,31 @@ function App() {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {workbookPreviewMode && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => setSheetPage((current) => Math.max(0, current - 1))}
+                  disabled={sheetPage <= 0}
+                >
+                  Prev
+                </Button>
+                <span className="font-mono text-[10px]">
+                  Page {sheetPage + 1}/{totalWorkbookPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => setSheetPage((current) => Math.min(totalWorkbookPages - 1, current + 1))}
+                  disabled={sheetPage >= totalWorkbookPages - 1}
+                >
+                  Next
+                </Button>
+              </>
+            )}
             <Badge variant="outline" className="h-4 px-1 text-[9px] tracking-wider uppercase font-bold bg-white">
               {activeJobId ? 'Prepare Completed' : activeWorkflowId ? 'Workflow Completed' : explorationResult ? 'Explored' : 'Ready'}
             </Badge>

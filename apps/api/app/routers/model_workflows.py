@@ -17,6 +17,7 @@ from app.models.schemas import (
     WorkflowMetrics,
     WorkflowRowsResponse,
 )
+from app.services.exploration_store import load_exploration_result
 from app.services.job_store import load_job_state, save_job_state, save_result_artifacts
 from app.services.ml.boundary import build_boundary_snapshot
 from app.services.ml.model_workflows import run_model_workflow
@@ -37,7 +38,13 @@ async def run_workflow(request: ModelWorkflowRequest):
         workflow_result.metadata.update(source_metadata)
 
         current_csv_path, current_xlsx_path = save_result_artifacts(workflow_id, workflow_result.result_df, name="results")
-        export_path = _save_workflow_export(workflow_id, workflow_result.result_df, workflow_result.metrics)
+        exploration_result = load_exploration_result(request.workbook_id, request.sheet_name)
+        export_path = _save_workflow_export(
+            workflow_id,
+            workflow_result.result_df,
+            workflow_result.metrics,
+            exploration_result=exploration_result,
+        )
 
         state = {
             "job_id": workflow_id,
@@ -52,6 +59,7 @@ async def run_workflow(request: ModelWorkflowRequest):
             "request": request.model_dump(mode="json"),
             "metadata": workflow_result.metadata,
             "metrics": workflow_result.metrics,
+            "exploration_available": exploration_result is not None,
             "result_path": str(current_csv_path),
             "result_xlsx_path": str(current_xlsx_path),
             "export_xlsx_path": str(export_path),
@@ -187,13 +195,32 @@ def _resolve_result_path(state: dict[str, Any]) -> Path:
     raise HTTPException(status_code=404, detail="Workflow result not found")
 
 
-def _save_workflow_export(workflow_id: str, result_df: pd.DataFrame, metrics: dict[str, Any]) -> Path:
+def _save_workflow_export(
+    workflow_id: str,
+    result_df: pd.DataFrame,
+    metrics: dict[str, Any],
+    exploration_result: dict[str, Any] | None = None,
+) -> Path:
     export_path = RESULT_DIR / workflow_id / "workflow_export.xlsx"
     export_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
         result_df.to_excel(writer, sheet_name="results", index=False)
         metrics_rows = [{"metric": key, "value": json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, (dict, list)) else value} for key, value in metrics.items()]
         pd.DataFrame(metrics_rows).to_excel(writer, sheet_name="metrics", index=False)
+        if exploration_result and isinstance(exploration_result.get("evaluation"), dict):
+            evaluation = exploration_result["evaluation"]
+            rows = [
+                {"key": "overall_verdict", "value": evaluation.get("overall_verdict")},
+                {"key": "signal_strength", "value": evaluation.get("signal_strength")},
+                {"key": "model_viability", "value": evaluation.get("model_viability")},
+                {"key": "confidence", "value": evaluation.get("confidence")},
+                {"key": "risk_flags", "value": json.dumps(evaluation.get("risk_flags", []), ensure_ascii=False)},
+                {"key": "next_actions", "value": json.dumps(evaluation.get("next_actions", []), ensure_ascii=False)},
+                {"key": "decision", "value": json.dumps(evaluation.get("decision", {}), ensure_ascii=False)},
+            ]
+            pd.DataFrame(rows).to_excel(writer, sheet_name="evaluation", index=False)
+        else:
+            pd.DataFrame([{"key": "evaluation_not_available", "value": True}]).to_excel(writer, sheet_name="evaluation", index=False)
     return export_path
 
 

@@ -1,6 +1,8 @@
 # TabuLens
 
 TabuLens は、Excel / CSV の表形式データを使って「このデータで ML が効きそうか」を短時間で当たり付けするローカル解析ツールです。  
+主目的は **ML feasibility check** であり、本格的な AutoML platform やモデル運用基盤ではありません。
+データはローカル実行を前提とし、`Explore` で判断、`Workflow` で詳細検証を行います。
 MVP の主導線は `Prepare`・`Explore`・`Workflow` の 3 つです。
 
 - `Prepare`: クレンジングと特徴量重要度の可視化
@@ -138,6 +140,8 @@ VITE_API_BASE_URL=http://localhost:18273/api pnpm dev
 | `POST` | `/api/workbooks/upload` | `.xlsx` / `.csv` のアップロード |
 | `GET` | `/api/workbooks/{workbook_id}` | workbook 取得 |
 | `GET` | `/api/workbooks/{workbook_id}/sheets/{sheet_name}/preview` | 先頭 10 行プレビュー |
+| `GET` | `/api/workbooks/{workbook_id}/sheets/{sheet_name}/rows?offset=0&limit=100` | 行ページ取得 |
+| `GET` | `/api/workbooks/{workbook_id}/sheets/{sheet_name}/profile` | シート統計取得 |
 
 ### Prepare Jobs
 

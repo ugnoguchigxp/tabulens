@@ -10,6 +10,7 @@ from app.models.schemas import (
     ColumnMapping,
     DataProfile,
     DataProfileColumn,
+    ExplorationDecision,
     ExplorationEvaluation,
     ExplorationNextAction,
     ExplorationRequest,
@@ -164,9 +165,12 @@ def build_exploration_evaluation(
     reasons: list[str] = []
     feature_columns = set(mapping.feature_columns)
     risky_feature_flags: set[str] = set()
+    warning_columns: dict[str, list[str]] = {}
     for column in profile.columns:
         if column.name in feature_columns:
             risky_feature_flags.update(column.warning_flags)
+            for warning in column.warning_flags:
+                warning_columns.setdefault(warning, []).append(column.name)
     if "likely_identifier" in risky_feature_flags:
         risk_flags.append("likely_identifier_features")
     if "high_missing_rate" in risky_feature_flags:
@@ -179,7 +183,7 @@ def build_exploration_evaluation(
     successful = [item for item in model_sweep.items if item.status == "success" and item.primary_metric is not None]
     if target.target_kind not in {"classification", "regression"}:
         reasons.append("Label column is missing or target kind is not inferable.")
-        next_actions = _build_next_actions(target.target_kind, risk_flags, "unknown", "unknown")
+        next_actions = _build_next_actions(target.target_kind, risk_flags, "unknown", "unknown", warning_columns)
         return ExplorationEvaluation(
             signal_strength="unknown",
             model_viability="unknown",
@@ -187,13 +191,14 @@ def build_exploration_evaluation(
             confidence=0.2,
             reasons=reasons,
             risk_flags=_dedupe(risk_flags),
+            decision=_build_decision("needs_better_target" if "label_column_missing" in risk_flags else "not_enough_data", risk_flags),
             next_actions=next_actions,
         )
 
     if not successful:
         risk_flags.append("all_models_failed")
         reasons.append("All candidate models failed to train or evaluate for this target.")
-        next_actions = _build_next_actions(target.target_kind, risk_flags, "none", "not_useful")
+        next_actions = _build_next_actions(target.target_kind, risk_flags, "none", "not_useful", warning_columns)
         verdict = "needs_better_target" if _has_target_failure(risk_flags) else "needs_better_features"
         return ExplorationEvaluation(
             signal_strength="none",
@@ -202,6 +207,7 @@ def build_exploration_evaluation(
             confidence=0.25,
             reasons=reasons,
             risk_flags=_dedupe(risk_flags),
+            decision=_build_decision(verdict, risk_flags),
             next_actions=next_actions,
         )
 
@@ -212,7 +218,7 @@ def build_exploration_evaluation(
     reasons.extend(additional_reasons)
 
     verdict = _determine_overall_verdict(signal_strength, model_viability, risk_flags)
-    next_actions = _build_next_actions(target.target_kind, risk_flags, signal_strength, model_viability)
+    next_actions = _build_next_actions(target.target_kind, risk_flags, signal_strength, model_viability, warning_columns)
     return ExplorationEvaluation(
         signal_strength=signal_strength,
         model_viability=model_viability,
@@ -220,6 +226,7 @@ def build_exploration_evaluation(
         confidence=_clamp(confidence, 0.0, 1.0),
         reasons=_dedupe(reasons),
         risk_flags=_dedupe(risk_flags),
+        decision=_build_decision(verdict, risk_flags),
         next_actions=next_actions,
     )
 
@@ -475,13 +482,21 @@ def _build_next_actions(
     risk_flags: list[str],
     signal_strength: str,
     model_viability: str,
+    warning_columns: dict[str, list[str]],
 ) -> list[ExplorationNextAction]:
     actions: list[ExplorationNextAction] = []
 
     def add(action: str, reason: str, priority: str) -> None:
         if any(item.action == action for item in actions):
             return
-        actions.append(ExplorationNextAction(action=action, reason=reason, priority=priority))
+        actions.append(
+            ExplorationNextAction(
+                action=action,
+                reason=reason,
+                priority=priority,
+                affected_columns=_affected_columns_for_action(risk_flags, action, warning_columns),
+            )
+        )
 
     if any(flag in risk_flags for flag in {"label_column_missing", "single_class_target", "non_numeric_target", "near_constant_target"}):
         add("change_target", "Current target configuration is not suitable for model learning.", "high")
@@ -505,6 +520,64 @@ def _build_next_actions(
 
 def _has_target_failure(risk_flags: list[str]) -> bool:
     return any(flag in risk_flags for flag in {"label_column_missing", "single_class_target", "non_numeric_target", "near_constant_target"})
+
+
+def _build_decision(verdict: str, risk_flags: list[str]) -> ExplorationDecision:
+    if verdict == "usable_signal":
+        return ExplorationDecision(
+            primary_message="Signal looks usable. Proceed to workflow validation.",
+            recommended_path="run_workflow",
+            primary_blocker=None,
+        )
+    if verdict == "needs_better_target":
+        return ExplorationDecision(
+            primary_message="Current target configuration is not suitable for reliable learning.",
+            recommended_path="change_target",
+            primary_blocker="target_configuration",
+        )
+    if verdict == "not_enough_data":
+        return ExplorationDecision(
+            primary_message="Data volume is too small for stable model evaluation.",
+            recommended_path="collect_more_data",
+            primary_blocker="row_count",
+        )
+    if "overfit_risk" in risk_flags:
+        return ExplorationDecision(
+            primary_message="Potential overfitting detected. Improve data quality before workflow.",
+            recommended_path="inspect_data_quality",
+            primary_blocker="train_test_gap",
+        )
+    if "no_model_beats_baseline" in risk_flags:
+        return ExplorationDecision(
+            primary_message="Current feature set does not outperform baseline reliably.",
+            recommended_path="use_baseline",
+            primary_blocker="baseline_gap",
+        )
+    return ExplorationDecision(
+        primary_message="Feature signal needs improvement before workflow execution.",
+        recommended_path="adjust_features",
+        primary_blocker="feature_quality",
+    )
+
+
+def _affected_columns_for_action(
+    risk_flags: list[str],
+    action: str,
+    warning_columns: dict[str, list[str]],
+) -> list[str]:
+    if action != "exclude_risky_columns":
+        return []
+    risk_to_warning: dict[str, str] = {
+        "likely_identifier_features": "likely_identifier",
+        "high_missing_rate_features": "high_missing_rate",
+        "low_variance_features": "low_variance",
+    }
+    columns: list[str] = []
+    for risk_flag in risk_flags:
+        warning = risk_to_warning.get(risk_flag)
+        if warning:
+            columns.extend(warning_columns.get(warning, []))
+    return _dedupe(columns)
 
 
 def _extract_test_r2(item: ModelSweepItem) -> float | None:
