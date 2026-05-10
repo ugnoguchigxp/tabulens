@@ -1,0 +1,15 @@
+[project]
+name = "tabulens-api"
+version = "0.1.0"
+description = "TabuLens API"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pandas",
+    "openpyxl",
+    "scikit-learn",
+    "pydantic",
+    "numpy",
+    "joblib",
+    "python-multipart",
+]
