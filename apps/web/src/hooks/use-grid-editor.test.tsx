@@ -38,4 +38,17 @@ describe('useGridEditor hook', () => {
     expect(result.current.extraColumns).toContain('new_col');
     expect(result.current.localRowData[0]).toHaveProperty('new_col');
   });
+
+  it('should remove column by name', () => {
+    const initialData = [{ a: 1, b: 2 }, { a: 3, b: 4 }];
+    const { result } = renderHook(() => useGridEditor(initialData));
+
+    act(() => {
+      result.current.removeColumn('b');
+    });
+
+    expect(result.current.columnKeys).toEqual(['a']);
+    expect(result.current.localRowData[0]).toEqual({ a: 1 });
+    expect(result.current.localRowData[1]).toEqual({ a: 3 });
+  });
 });

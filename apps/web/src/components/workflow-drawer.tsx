@@ -48,12 +48,10 @@ const USE_CASE_ALGORITHMS: Record<string, Array<{ value: string; label: string }
     { value: 'one_class_svm', label: 'One-Class SVM' },
     { value: 'local_outlier_factor', label: 'Local Outlier Factor' },
   ],
-  recommendation: [{ value: 'popularity_baseline', label: 'Popularity Baseline' }],
   clustering: [
     { value: 'kmeans', label: 'KMeans' },
     { value: 'dbscan', label: 'DBSCAN' },
   ],
-  noise_reduction: [{ value: 'isolation_forest', label: 'Isolation Forest' }],
 };
 
 function isNumericColumn(column: ColumnLike) {
@@ -90,7 +88,6 @@ export function WorkflowDrawer({
     handleIdColumnChange,
     handleLabelColumnChange,
     toggleFeatureColumn,
-    handleMappingKeyChange,
   } = useWorkflowSettings(mapping, setMapping, workflowSettings, setWorkflowSettings, rowCount);
 
   const useCase = workflowSettings.use_case || 'classification';
@@ -109,7 +106,7 @@ export function WorkflowDrawer({
             </div>
             <div>
               <h2 className="text-xl font-bold">Model Workflow</h2>
-              <p className="text-xs text-muted-foreground">Classification, prediction, anomaly, clustering, recommendation, and noise reduction</p>
+              <p className="text-xs text-muted-foreground">Classification, prediction, anomaly detection, and clustering</p>
             </div>
           </div>
           <Button variant="ghost" size="icon" onClick={onClose}>
@@ -121,8 +118,9 @@ export function WorkflowDrawer({
           <Card className="border-slate-200 shadow-sm">
             <CardContent className="space-y-4 p-4">
               <div className="space-y-2">
-                <Label className="text-xs">Use Case</Label>
+                <Label htmlFor="use-case-select" className="text-xs">Use Case</Label>
                 <select
+                  id="use-case-select"
                   value={useCase}
                   onChange={(event) => handleUseCaseChange(event.target.value as any)}
                   className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
@@ -130,15 +128,14 @@ export function WorkflowDrawer({
                   <option value="classification">Classification</option>
                   <option value="prediction">Prediction / Regression</option>
                   <option value="anomaly_detection">Anomaly Detection</option>
-                  <option value="recommendation">Recommendation</option>
                   <option value="clustering">Clustering</option>
-                  <option value="noise_reduction">Noise Reduction</option>
                 </select>
               </div>
 
               <div className="space-y-2">
-                <Label className="text-xs">Algorithm</Label>
+                <Label htmlFor="algorithm-select" className="text-xs">Algorithm</Label>
                 <select
+                  id="algorithm-select"
                   value={workflowSettings.algorithm}
                   onChange={(event) => handleAlgorithmChange(event.target.value)}
                   className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
@@ -166,8 +163,9 @@ export function WorkflowDrawer({
               </div>
 
               <div className="space-y-2">
-                <Label className="text-xs">ID Column</Label>
+                <Label htmlFor="id-column-select" className="text-xs">ID Column</Label>
                 <select
+                  id="id-column-select"
                   value={mapping.id_column}
                   onChange={(event) => handleIdColumnChange(event.target.value)}
                   className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
@@ -181,7 +179,7 @@ export function WorkflowDrawer({
                 </select>
               </div>
 
-              {(useCase === 'classification' || useCase === 'prediction' || useCase === 'clustering' || useCase === 'anomaly_detection' || useCase === 'noise_reduction') && (
+              {(useCase === 'classification' || useCase === 'prediction' || useCase === 'clustering' || useCase === 'anomaly_detection') && (
                 <div className="space-y-2">
                   <Label className="text-xs">Feature Columns</Label>
                   <div className="flex flex-wrap gap-1.5">
@@ -213,8 +211,9 @@ export function WorkflowDrawer({
 
               {(useCase === 'classification' || useCase === 'prediction') && (
                 <div className="space-y-2">
-                  <Label className="text-xs">Label Column</Label>
+                  <Label htmlFor="label-column-select" className="text-xs">Label Column</Label>
                   <select
+                    id="label-column-select"
                     value={mapping.label_column}
                     onChange={(event) => handleLabelColumnChange(event.target.value)}
                     className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
@@ -240,32 +239,6 @@ export function WorkflowDrawer({
                 </div>
               )}
 
-              {useCase === 'recommendation' && (
-                <div className="grid grid-cols-2 gap-3">
-                  {[
-                    ['user_id_column', 'User ID'],
-                    ['item_id_column', 'Item ID'],
-                    ['rating_column', 'Rating'],
-                    ['timestamp_column', 'Timestamp'],
-                  ].map(([key, label]) => (
-                    <div key={key} className="space-y-2">
-                      <Label className="text-xs">{label}</Label>
-                      <select
-                        value={(mapping as any)[key] ?? ''}
-                        onChange={(event) => handleMappingKeyChange(key, event.target.value)}
-                        className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
-                      >
-                        <option value="">None</option>
-                        {columns.map((column) => (
-                          <option key={column.name} value={column.name}>
-                            {column.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-              )}
             </CardContent>
           </Card>
 
@@ -303,7 +276,7 @@ export function WorkflowDrawer({
                   <div className="grid grid-cols-2 gap-3">
                     <NumberInput
                       label="Train Size"
-                      value={workflowSettings.params.train_size ?? 0.8}
+                      value={Number(workflowSettings.params.train_size ?? 0.8)}
                       step={splitMode === 'count' ? 1 : 0.05}
                       min={splitMode === 'count' ? 1 : 0.05}
                       max={splitMode === 'count' ? Math.max(2, rowCount || 2) : 0.95}
@@ -311,7 +284,7 @@ export function WorkflowDrawer({
                     />
                     <NumberInput
                       label="Test Size"
-                      value={workflowSettings.params.test_size ?? 0.2}
+                      value={Number(workflowSettings.params.test_size ?? 0.2)}
                       step={splitMode === 'count' ? 1 : 0.05}
                       min={splitMode === 'count' ? 1 : 0.05}
                       max={splitMode === 'count' ? Math.max(2, rowCount || 2) : 0.95}
@@ -321,14 +294,15 @@ export function WorkflowDrawer({
                   <div className="grid grid-cols-2 gap-3">
                     <NumberInput
                       label="Random State"
-                      value={workflowSettings.params.random_state ?? 42}
+                      value={Number(workflowSettings.params.random_state ?? 42)}
                       step={1}
                       min={0}
                       onChange={(value) => handleParamChange('random_state', value)}
                     />
                     <div className="space-y-2">
-                      <Label className="text-xs">Split Mode</Label>
+                      <Label htmlFor="split-mode-select" className="text-xs">Split Mode</Label>
                       <select
+                        id="split-mode-select"
                         value={splitMode}
                         onChange={(event) => handleSplitModeChange(event.target.value as any)}
                         className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
@@ -345,7 +319,7 @@ export function WorkflowDrawer({
                 <div className="grid grid-cols-2 gap-3">
                   <NumberInput
                     label="Contamination"
-                    value={workflowSettings.params.contamination ?? 0.1}
+                    value={Number(workflowSettings.params.contamination ?? 0.1)}
                     step={0.01}
                     min={0.01}
                     max={0.5}
@@ -353,7 +327,7 @@ export function WorkflowDrawer({
                   />
                   <NumberInput
                     label="k for LOF"
-                    value={workflowSettings.params.n_neighbors ?? 10}
+                    value={Number(workflowSettings.params.n_neighbors ?? 10)}
                     step={1}
                     min={2}
                     onChange={(value) => handleParamChange('n_neighbors', value)}
@@ -361,79 +335,29 @@ export function WorkflowDrawer({
                 </div>
               )}
 
-              {useCase === 'recommendation' && (
-                <div className="grid grid-cols-2 gap-3">
-                  <NumberInput
-                    label="Top K"
-                    value={workflowSettings.params.top_k ?? 5}
-                    step={1}
-                    min={1}
-                    onChange={(value) => handleParamChange('top_k', value)}
-                  />
-                  <div className="space-y-2">
-                    <Label className="text-xs">Baseline</Label>
-                    <div className="rounded-md border bg-slate-50 px-3 py-2 text-xs text-muted-foreground">
-                      Popularity-based ranking
-                    </div>
-                  </div>
-                </div>
-              )}
-
               {useCase === 'clustering' && (
                 <div className="grid grid-cols-3 gap-3">
                   <NumberInput
                     label="Clusters"
-                    value={workflowSettings.params.cluster_count ?? 3}
+                    value={Number(workflowSettings.params.cluster_count ?? 3)}
                     step={1}
                     min={1}
                     onChange={(value) => handleParamChange('cluster_count', value)}
                   />
                   <NumberInput
                     label="DBSCAN eps"
-                    value={workflowSettings.params.eps ?? 0.8}
+                    value={Number(workflowSettings.params.eps ?? 0.8)}
                     step={0.05}
                     min={0.05}
                     onChange={(value) => handleParamChange('eps', value)}
                   />
                   <NumberInput
                     label="Min Samples"
-                    value={workflowSettings.params.min_samples ?? 5}
+                    value={Number(workflowSettings.params.min_samples ?? 5)}
                     step={1}
                     min={2}
                     onChange={(value) => handleParamChange('min_samples', value)}
                   />
-                </div>
-              )}
-
-              {useCase === 'noise_reduction' && (
-                <div className="grid grid-cols-2 gap-3">
-                  <NumberInput
-                    label="Missing Threshold"
-                    value={workflowSettings.params.missing_row_threshold ?? 0.5}
-                    step={0.05}
-                    min={0.05}
-                    max={0.95}
-                    onChange={(value) => handleParamChange('missing_row_threshold', value)}
-                  />
-                  <NumberInput
-                    label="Contamination"
-                    value={workflowSettings.params.contamination ?? 0.1}
-                    step={0.01}
-                    min={0.01}
-                    max={0.5}
-                    onChange={(value) => handleParamChange('contamination', value)}
-                  />
-                  <div className="space-y-2 col-span-2">
-                    <Label className="text-xs">Apply Mode</Label>
-                    <select
-                      value={workflowSettings.params.apply_mode ?? 'preview'}
-                      onChange={(event) => handleParamChange('apply_mode', event.target.value)}
-                      className="w-full h-9 rounded-md border bg-slate-50 px-3 text-xs"
-                    >
-                      <option value="preview">Preview</option>
-                      <option value="auto">Auto apply</option>
-                    </select>
-                  </div>
                 </div>
               )}
             </CardContent>
@@ -473,8 +397,9 @@ function NumberInput({
 }) {
   return (
     <div className="space-y-2">
-      <Label className="text-xs">{label}</Label>
+      <Label htmlFor={`number-input-${label.replace(/\s+/g, '-').toLowerCase()}`} className="text-xs">{label}</Label>
       <input
+        id={`number-input-${label.replace(/\s+/g, '-').toLowerCase()}`}
         type="number"
         value={Number.isFinite(value) ? value : 0}
         step={step}

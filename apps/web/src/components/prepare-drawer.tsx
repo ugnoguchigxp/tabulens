@@ -98,11 +98,11 @@ export function PrepareDrawer({
             </Card>
           </section>
 
-          {/* Feature Selection Section */}
+          {/* Feature Importance Section */}
           <section className={cn("space-y-4 transition-opacity", !settings.run_feature_selection && "opacity-50")}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                <Filter className="size-4" /> 2. Feature Selection
+                <Filter className="size-4" /> 2. Feature Importance
               </div>
               <button 
                 onClick={() => setSettings({...settings, run_feature_selection: !settings.run_feature_selection})}
@@ -113,21 +113,10 @@ export function PrepareDrawer({
               </button>
             </div>
             <Card className="border-slate-200 shadow-sm">
-              <CardContent className="p-4 space-y-4">
-                <div className="space-y-2">
-                  <Label className="text-xs flex justify-between">
-                    Importance Threshold 
-                    <span className="text-primary font-bold">{(settings.preprocessing.feature_selection_threshold || 0).toFixed(2)}</span>
-                  </Label>
-                  <input 
-                    disabled={!settings.run_feature_selection}
-                    type="range" min="0" max="0.5" step="0.01"
-                    value={settings.preprocessing.feature_selection_threshold || 0}
-                    onChange={e => setSettings({...settings, preprocessing: {...settings.preprocessing, feature_selection_threshold: parseFloat(e.target.value)}})}
-                    className="w-full accent-primary disabled:opacity-50"
-                  />
-                  <p className="text-[10px] text-muted-foreground italic">Calculates feature importance and marks weak columns before workflow training.</p>
-                </div>
+              <CardContent className="p-4">
+                <p className="text-[11px] text-muted-foreground">
+                  Calculates relative feature importance only. Columns are not dropped automatically.
+                </p>
               </CardContent>
             </Card>
           </section>

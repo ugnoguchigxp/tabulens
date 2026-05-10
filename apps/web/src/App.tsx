@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { AgGridReact } from 'ag-grid-react'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-quartz.css'
-import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Sparkles, Database, Filter, Gauge, ArrowDownNarrowWide, Maximize2, Play } from 'lucide-react'
+import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Sparkles, Database, Gauge, ArrowDownNarrowWide, Maximize2, Play, Search } from 'lucide-react'
 import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community'
 
 ModuleRegistry.registerModules([AllCommunityModule])
@@ -12,31 +12,17 @@ import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 import { BoundaryExplorer } from '@/components/boundary-explorer'
-import { ModelReviewModal } from '@/components/model-review-modal'
-import { ReviewPanel } from '@/components/review-panel'
 import { WorkflowDrawer } from '@/components/workflow-drawer'
 import { WorkflowPanel } from '@/components/workflow-panel'
-import { apiClient } from '@/lib/api-client'
+import { ExplorationPanel } from '@/components/exploration-panel'
 import {
   useUploadWorkbook,
   useRunAnalysis,
   useRunModelWorkflow,
+  useRunExploration,
   useJobResults,
-  useJobReviewSummary,
-  useJobReviewResult,
-  useJobProposals,
-  useJobCompare,
   useJobBoundary,
   useWorkflowBoundary,
-  useWorkflowReviewSummary,
-  useWorkflowReviewResult,
-  useWorkflowReviewProposals,
-  useReviewModelWorkflow,
-  useDiscardWorkflowReviewProposal,
-  useRerunWorkflowReview,
-  useReviewJob,
-  useApplyProposal,
-  useDiscardProposal,
 } from '@/hooks/use-tabulens'
 import { useGridEditor } from '@/hooks/use-grid-editor'
 import { PrepareDrawer } from '@/components/prepare-drawer'
@@ -59,6 +45,7 @@ type WorkbookUploadResponse = {
 }
 
 type GridRow = Record<string, unknown>
+const LOW_IMPORTANCE_THRESHOLD = 0.2
 
 function App() {
   const [selectedSheet, setSelectedSheet] = useState<number>(0)
@@ -68,14 +55,12 @@ function App() {
   const [jobMetadata, setJobMetadata] = useState<Record<string, unknown> | null>(null)
   const [workflowResult, setWorkflowResult] = useState<any | null>(null)
   const [showSettings, setShowSettings] = useState(true)
-  const [showReviewPanel, setShowReviewPanel] = useState(true)
   const [showWorkflowPanel, setShowWorkflowPanel] = useState(true)
   const [showWorkflowDrawer, setShowWorkflowDrawer] = useState(false)
   const [showBoundaryModal, setShowBoundaryModal] = useState(false)
-  const [showModelReviewModal, setShowModelReviewModal] = useState(false)
   const [showAnalysisDrawer, setShowAnalysisDrawer] = useState(false)
-  const [proposalStatusById, setProposalStatusById] = useState<Record<string, 'applied' | 'discarded'>>({})
-  const [modelReviewComparison, setModelReviewComparison] = useState<any | null>(null)
+  const [explorationResult, setExplorationResult] = useState<any | null>(null)
+  const [manuallyDroppedFeatures, setManuallyDroppedFeatures] = useState<string[]>([])
 
   const {
     localRowData,
@@ -88,6 +73,7 @@ function App() {
     handleDeleteRow,
     handleInsertColumn,
     handleDeleteColumn,
+    removeColumn,
     handleClearCell,
     columnKeys,
   } = useGridEditor([])
@@ -114,21 +100,9 @@ function App() {
   const uploadMutation = useUploadWorkbook()
   const analysisMutation = useRunAnalysis()
   const workflowMutation = useRunModelWorkflow()
+  const explorationMutation = useRunExploration()
   const { data: resultRows, isLoading: resultsLoading } = useJobResults(activeJobId)
-  const { data: reviewSummary } = useJobReviewSummary(activeJobId)
-  const { data: reviewResult } = useJobReviewResult(activeJobId)
-  const { data: proposals } = useJobProposals(activeJobId)
-  const { data: comparison } = useJobCompare(activeJobId)
   const { data: boundary, isLoading: boundaryLoading, error: boundaryError } = useJobBoundary(activeJobId)
-  const { data: workflowReviewSummary } = useWorkflowReviewSummary(activeWorkflowId)
-  const { data: workflowReviewResult } = useWorkflowReviewResult(activeWorkflowId)
-  const { data: workflowReviewProposals } = useWorkflowReviewProposals(activeWorkflowId)
-  const reviewMutation = useReviewJob(activeJobId)
-  const applyProposalMutation = useApplyProposal(activeJobId)
-  const discardProposalMutation = useDiscardProposal(activeJobId)
-  const reviewModelMutation = useReviewModelWorkflow(activeWorkflowId)
-  const discardWorkflowProposalMutation = useDiscardWorkflowReviewProposal(activeWorkflowId)
-  const rerunWorkflowReviewMutation = useRerunWorkflowReview(activeWorkflowId)
   const {
     data: workflowBoundary,
     isLoading: workflowBoundaryLoading,
@@ -137,11 +111,12 @@ function App() {
 
   const workbookData = uploadMutation.data as WorkbookUploadResponse | undefined
   const featureImportance = jobMetadata?.feature_importance as Record<string, number> | undefined
-  const selectedFeatures = Array.isArray(jobMetadata?.selected_features) ? (jobMetadata.selected_features as string[]) : []
-  const droppedFeatures = Array.isArray(jobMetadata?.dropped_features) ? (jobMetadata.dropped_features as string[]) : []
-  const proposalItems = Array.isArray(proposals?.proposals) ? proposals.proposals : []
-  const workflowProposalItems = Array.isArray(workflowReviewProposals?.proposals) ? workflowReviewProposals.proposals : []
+  const allDroppedFeatures = useMemo(() => manuallyDroppedFeatures, [manuallyDroppedFeatures])
   const activeSheet = workbookData?.sheets[selectedSheet]
+  const visibleSheetColumns = useMemo(
+    () => (activeSheet?.columns ?? []).filter((column) => !manuallyDroppedFeatures.includes(column.name)),
+    [activeSheet, manuallyDroppedFeatures]
+  )
   const sourceRowCount = activeSheet?.row_count ?? 0
   const processedRowCount = activeWorkflowId
     ? Array.isArray(workflowResult?.rows)
@@ -156,16 +131,12 @@ function App() {
   const boundaryReady = !!mapping.label_column && selectedLabelIsCategorical && boundaryFeatureCount >= 2
   const workflowBoundaryReady = !!activeWorkflowId && workflowResult?.use_case === 'classification'
   const allowDraftRowExtension = !resultRows && !activeWorkflowId
-  const isProcessing = resultsLoading || analysisMutation.isPending || workflowMutation.isPending
+  const isProcessing = resultsLoading || analysisMutation.isPending || workflowMutation.isPending || explorationMutation.isPending
   const preparedSourceColumns = activeJobId ? inferColumnsFromRows(localRowData) : undefined
   const preparedSourceRowCount = activeJobId ? localRowData.length : undefined
   const activeBoundary = workflowBoundaryReady ? workflowBoundary : boundary
   const activeBoundaryLoading = workflowBoundaryReady ? workflowBoundaryLoading : boundaryLoading
   const activeBoundaryError = workflowBoundaryReady ? workflowBoundaryError : boundaryError
-
-  useEffect(() => {
-    setProposalStatusById({})
-  }, [activeJobId])
 
   useEffect(() => {
     if (resultRows) setLocalRowData(resultRows)
@@ -177,10 +148,6 @@ function App() {
       setLocalRowData(sheet.rows ?? sheet.preview_rows)
     }
   }, [resultRows, activeWorkflowId, workflowResult, workbookData, selectedSheet])
-
-  useEffect(() => {
-    if (activeJobId) setShowReviewPanel(true)
-  }, [activeJobId])
 
   useEffect(() => {
     if (!activeJobId && !workflowBoundaryReady) setShowBoundaryModal(false)
@@ -215,14 +182,29 @@ function App() {
           setActiveWorkflowId(null)
           setJobMetadata(null)
           setWorkflowResult(null)
-          setModelReviewComparison(null)
+          setExplorationResult(null)
+          setManuallyDroppedFeatures([])
           setSelectedSheet(0)
-          setShowReviewPanel(true)
           setShowWorkflowPanel(true)
         }
       })
     }
   }
+
+  const handleDropLowImportanceFeature = useCallback((featureName: string) => {
+    const isDroppable =
+      mapping.feature_columns.includes(featureName) &&
+      mapping.label_column !== featureName &&
+      mapping.id_column !== featureName
+    if (!isDroppable) return
+
+    removeColumn(featureName)
+    setMapping((current) => ({
+      ...current,
+      feature_columns: current.feature_columns.filter((feature) => feature !== featureName),
+    }))
+    setManuallyDroppedFeatures((current) => (current.includes(featureName) ? current : [...current, featureName]))
+  }, [mapping.feature_columns, mapping.id_column, mapping.label_column, removeColumn])
 
   const submitAnalysis = async (mappingToUse: ColumnMapping) => {
     if (!workbookData) return
@@ -240,17 +222,9 @@ function App() {
         setActiveJobId(data.job_id)
         setActiveWorkflowId(null)
         setWorkflowResult(null)
-        setModelReviewComparison(null)
+        setExplorationResult(null)
         setJobMetadata(data.metadata)
-        const selected = Array.isArray(data.metadata?.selected_features) ? data.metadata.selected_features : []
-        if (selected.length > 0) {
-          setMapping((current) => ({
-            ...current,
-            feature_columns: current.feature_columns.filter((feature) => selected.includes(feature)),
-          }))
-        }
         setShowAnalysisDrawer(false)
-        setShowReviewPanel(true)
         setShowWorkflowPanel(false)
       }
     })
@@ -294,9 +268,7 @@ function App() {
         setJobMetadata(null)
         setShowWorkflowDrawer(false)
         setShowWorkflowPanel(true)
-        setShowReviewPanel(false)
-        setShowModelReviewModal(false)
-        setModelReviewComparison(null)
+        setExplorationResult(null)
         if (Array.isArray(data.rows)) {
           setLocalRowData(data.rows)
         }
@@ -304,67 +276,31 @@ function App() {
     })
   }
 
-  const handleApplyProposal = useCallback((proposalId: string) => {
-    applyProposalMutation.mutate(proposalId, {
-      onSuccess: (comparisonResult: any) => {
-        const appliedProposals = Array.isArray(comparisonResult?.applied_proposals) ? comparisonResult.applied_proposals : []
-        setProposalStatusById((current) => {
-          const next = { ...current }
-          if (appliedProposals.length > 0) {
-            appliedProposals.forEach((proposal: any) => {
-              if (proposal?.proposal_id) {
-                next[String(proposal.proposal_id)] = 'applied'
-              }
-            })
-          } else {
-            next[proposalId] = 'applied'
-          }
-          return next
-        })
+  const runExploration = useCallback(() => {
+    if (!workbookData || !activeSheet) return
+    const selectedLabel = activeSheet.columns.find((column) => column.name === mapping.label_column) ?? null
+    const inferredTaskType = !selectedLabel
+      ? 'auto'
+      : isNumericColumn(selectedLabel)
+        ? 'regression'
+        : 'classification'
+    explorationMutation.mutate(
+      {
+        workbook_id: workbookData.workbook_id,
+        sheet_name: activeSheet.name,
+        mapping,
+        task_type: inferredTaskType,
+        preprocessing: analysisSettings.preprocessing,
       },
-    })
-  }, [applyProposalMutation])
+      {
+        onSuccess: (data) => {
+          setExplorationResult(data)
+          setShowWorkflowPanel(false)
+        },
+      }
+    )
+  }, [workbookData, activeSheet, mapping, explorationMutation, analysisSettings.preprocessing])
 
-  const handleDiscardProposal = useCallback((proposalId: string) => {
-    discardProposalMutation.mutate(proposalId, {
-      onSuccess: (proposal: any) => {
-        if (!proposal?.proposal_id) return
-        setProposalStatusById((current) => ({
-          ...current,
-          [String(proposal.proposal_id)]: 'discarded',
-        }))
-      },
-    })
-  }, [discardProposalMutation])
-
-  const handleReviewModel = useCallback(() => {
-    if (!activeWorkflowId) return
-    reviewModelMutation.mutate(undefined, {
-      onSuccess: () => setShowModelReviewModal(true),
-    })
-  }, [activeWorkflowId, reviewModelMutation])
-
-  const handleDiscardWorkflowProposal = useCallback((proposalId: string) => {
-    discardWorkflowProposalMutation.mutate(proposalId)
-  }, [discardWorkflowProposalMutation])
-
-  const handleApplyAndRerunWorkflowProposal = useCallback((proposalId: string) => {
-    if (!activeWorkflowId) return
-    rerunWorkflowReviewMutation.mutate([proposalId], {
-      onSuccess: async (comparisonResult: any) => {
-        setModelReviewComparison(comparisonResult)
-        const nextWorkflowId = comparisonResult?.after_workflow_id
-        if (!nextWorkflowId) return
-        setActiveWorkflowId(String(nextWorkflowId))
-        try {
-          const nextWorkflow = await apiClient.getModelWorkflow(String(nextWorkflowId))
-          setWorkflowResult(nextWorkflow)
-        } catch {
-          // Keep the current result state if the rerun payload cannot be fetched yet.
-        }
-      },
-    })
-  }, [activeWorkflowId, rerunWorkflowReviewMutation])
 
   const onCellContextMenu = useCallback((params: any) => {
     params.event.preventDefault(); params.event.stopPropagation();
@@ -464,7 +400,8 @@ function App() {
                 setActiveWorkflowId(null)
                 setJobMetadata(null)
                 setWorkflowResult(null)
-                setModelReviewComparison(null)
+                setExplorationResult(null)
+                setManuallyDroppedFeatures([])
                 if (workbookData?.sheets[nextSheet]) {
                   setMapping(suggestMapping(workbookData.sheets[nextSheet]))
                 }
@@ -481,19 +418,6 @@ function App() {
           {workbookData && (
             <>
               <Button variant={showSettings ? "secondary" : "ghost"} size="icon" className="h-9 w-9" onClick={() => setShowSettings(!showSettings)}><Settings2 className="size-5" /></Button>
-              {activeJobId && (
-                <>
-                  <Button
-                    variant={showReviewPanel ? "secondary" : "ghost"}
-                    size="sm"
-                    className="h-9 gap-2 px-3"
-                    onClick={() => setShowReviewPanel(!showReviewPanel)}
-                    >
-                      <BarChart3 className="size-4" />
-                      <span className="hidden sm:inline">Prep Review</span>
-                    </Button>
-                  </>
-                )}
               {activeWorkflowId && (
                 <>
                   <Button
@@ -531,6 +455,16 @@ function App() {
               <Button
                 variant="secondary"
                 className="h-9 gap-2 px-4 shadow-sm"
+                onClick={runExploration}
+                disabled={mapping.feature_columns.length === 0 || explorationMutation.isPending}
+                title={mapping.feature_columns.length === 0 ? 'Select feature columns before exploration' : 'Run Exploration'}
+              >
+                <Search className="size-4" />
+                <span className="hidden sm:inline">{explorationMutation.isPending ? 'Exploring...' : 'Explore'}</span>
+              </Button>
+              <Button
+                variant="secondary"
+                className="h-9 gap-2 px-4 shadow-sm"
                 disabled={!activeJobId}
                 title={!activeJobId ? 'Run Prepare before Workflow' : 'Open Workflow'}
                 onClick={() => {
@@ -557,27 +491,47 @@ function App() {
                   <div className="space-y-1">
                     <h3 className="text-xs font-bold flex items-center gap-2 text-primary uppercase tracking-tighter"><Gauge className="size-3" /> Feature Insights</h3>
                     <p className="text-[10px] text-muted-foreground">Relative importance scores</p>
+                    <p className="text-[10px] text-muted-foreground">Features at or below 20% can be dropped from current analysis.</p>
                   </div>
                   <div className="space-y-2 bg-white p-3 rounded-lg border shadow-sm">
                     {Object.entries(featureImportance)
                       .sort(([, a], [, b]) => (b as number) - (a as number))
-                      .slice(0, 10)
-                      .map(([name, score]) => (
-                        <div key={name} className="space-y-1">
-                          <div className="flex justify-between text-[10px] font-medium">
-                            <span className="truncate max-w-[120px]">{name}</span>
-                            <span>{((score as number) * 100).toFixed(1)}%</span>
+                      .map(([name, score]) => {
+                        const normalizedScore = Number(score)
+                        const canDrop = normalizedScore <= LOW_IMPORTANCE_THRESHOLD
+                        const isDropped = manuallyDroppedFeatures.includes(name)
+                        const isSelectedFeature = mapping.feature_columns.includes(name)
+                        return (
+                          <div key={name} className="space-y-1">
+                            <div className="flex justify-between text-[10px] font-medium">
+                              <span className="truncate max-w-[120px]">{name}</span>
+                              <span>{(normalizedScore * 100).toFixed(1)}%</span>
+                            </div>
+                            <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                              <div className="h-full bg-primary transition-all duration-1000" style={{ width: `${normalizedScore * 100}%` }} />
+                            </div>
+                            {canDrop && (
+                              <div className="flex justify-end">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-6 px-2 text-[10px]"
+                                  onClick={() => handleDropLowImportanceFeature(name)}
+                                  disabled={isDropped || !isSelectedFeature}
+                                >
+                                  <Trash2 className="mr-1 size-3" />
+                                  {isDropped ? 'Dropped' : 'Drop column'}
+                                </Button>
+                              </div>
+                            )}
                           </div>
-                          <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                            <div className="h-full bg-primary transition-all duration-1000" style={{ width: `${(score as number) * 100}%` }} />
-                          </div>
-                        </div>
-                      ))}
-                    {droppedFeatures.length > 0 && (
+                        )
+                      })}
+                    {allDroppedFeatures.length > 0 && (
                       <div className="pt-2 border-t mt-2">
                         <Badge variant="secondary" className="text-[9px] h-4 py-0 flex items-center gap-1 w-fit bg-red-50 text-red-600 border-red-100">
                           <ArrowDownNarrowWide className="size-2.5" />
-                          {droppedFeatures.length} features dropped
+                          {allDroppedFeatures.length} features dropped
                         </Badge>
                       </div>
                     )}
@@ -593,7 +547,7 @@ function App() {
                   <Label className="text-xs">ID Column</Label>
                   <select value={mapping.id_column} onChange={e => setMapping({...mapping, id_column: e.target.value})} className="w-full h-9 rounded-md border bg-background px-2 text-xs">
                     <option value="">None</option>
-                    {workbookData.sheets[selectedSheet].columns.map((c: WorkbookColumn) => (<option key={c.name} value={c.name}>{c.name}</option>))}
+                    {visibleSheetColumns.map((c: WorkbookColumn) => (<option key={c.name} value={c.name}>{c.name}</option>))}
                   </select>
                 </div>
                 <div className="space-y-2">
@@ -611,7 +565,7 @@ function App() {
                     className="w-full h-9 rounded-md border bg-background px-2 text-xs"
                   >
                     <option value="">None (Unsupervised)</option>
-                    {activeSheet?.columns.map((c: WorkbookColumn) => (
+                    {visibleSheetColumns.map((c: WorkbookColumn) => (
                       <option key={c.name} value={c.name}>{c.name}</option>
                     ))}
                   </select>
@@ -658,7 +612,7 @@ function App() {
                     Click chips to toggle features. The current label is excluded automatically.
                   </p>
                   <div className="flex flex-wrap gap-1.5 pt-1">
-                    {activeSheet?.columns.map((c: WorkbookColumn) => {
+                    {visibleSheetColumns.map((c: WorkbookColumn) => {
                       const isSelected = mapping.feature_columns.includes(c.name)
                       const isLabel = mapping.label_column === c.name
                       return (
@@ -756,48 +710,11 @@ function App() {
               workflowId={activeWorkflowId}
               useCase={workflowResult?.use_case ?? workflowSettings.use_case}
               result={workflowResult}
-              reviewSummary={workflowReviewSummary}
-              reviewResult={workflowReviewResult}
-              reviewProposalCount={workflowProposalItems.length}
-              onOpenReview={() => setShowModelReviewModal(true)}
-              isReviewing={reviewModelMutation.isPending}
-              onDownloadModel={() => {
-                void apiClient.exportModelArtifact(activeWorkflowId).then((url: string) => {
-                  window.location.href = url
-                })
-              }}
             />
           )}
 
-          {activeJobId && showReviewPanel && (
-            <ReviewPanel
-              jobId={activeJobId}
-              reviewResult={reviewResult}
-              reviewSummary={reviewSummary}
-              proposals={proposalItems}
-              proposalStatusById={proposalStatusById}
-              comparison={comparison}
-              boundary={boundary}
-              boundaryLoading={boundaryLoading}
-              boundaryError={boundaryError instanceof Error ? boundaryError.message : boundaryError ? String(boundaryError) : null}
-              boundarySuggestedLabel={
-                suggestedMapping && suggestedMapping.label_column && suggestedMapping.label_column !== mapping.label_column
-                  ? suggestedMapping.label_column
-                  : null
-              }
-              onUseBoundarySuggestedLabel={
-                suggestedMapping && suggestedMapping.label_column && suggestedMapping.label_column !== mapping.label_column
-                  ? handleUseSuggestedLabel
-                  : undefined
-              }
-              onRefreshReview={() => reviewMutation.mutate()}
-              onApplyProposal={handleApplyProposal}
-              onDiscardProposal={handleDiscardProposal}
-              isRefreshing={reviewMutation.isPending}
-              isApplying={applyProposalMutation.isPending}
-              isDiscarding={discardProposalMutation.isPending}
-              showBoundary={false}
-            />
+          {!activeJobId && !activeWorkflowId && explorationResult && (
+            <ExplorationPanel result={explorationResult} />
           )}
         </div>
       </main>
@@ -815,13 +732,16 @@ function App() {
             <span className="flex items-center gap-1 border-l pl-4 font-mono">
               Visible {displayedRowCount} Rows
             </span>
-            {selectedFeatures.length > 0 && (
-              <span className="flex items-center gap-1 border-l pl-4 text-primary font-bold"><Filter className="size-3" />{selectedFeatures.length} Active Features</span>
+            {explorationResult && (
+              <span className="flex items-center gap-1 border-l pl-4 text-emerald-700 font-semibold">
+                <Search className="size-3" />
+                Exploration Ready
+              </span>
             )}
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="h-4 px-1 text-[9px] tracking-wider uppercase font-bold bg-white">
-              {activeJobId ? 'Prepare Completed' : activeWorkflowId ? 'Workflow Completed' : 'Ready'}
+              {activeJobId ? 'Prepare Completed' : activeWorkflowId ? 'Workflow Completed' : explorationResult ? 'Explored' : 'Ready'}
             </Badge>
             <span className="font-mono opacity-50">v1.3.0-ai</span>
           </div>
@@ -870,21 +790,6 @@ function App() {
         </div>
       )}
 
-      <ModelReviewModal
-        open={showModelReviewModal && Boolean(activeWorkflowId)}
-        workflowId={activeWorkflowId ?? ''}
-        reviewSummary={workflowReviewSummary}
-        reviewResult={workflowReviewResult}
-        proposals={workflowProposalItems}
-        comparison={modelReviewComparison}
-        onClose={() => setShowModelReviewModal(false)}
-        onReview={handleReviewModel}
-        onDiscardProposal={handleDiscardWorkflowProposal}
-        onApplyAndRerun={handleApplyAndRerunWorkflowProposal}
-        isReviewing={reviewModelMutation.isPending}
-        isDiscarding={discardWorkflowProposalMutation.isPending}
-        isRerunning={rerunWorkflowReviewMutation.isPending}
-      />
     </div>
   )
 }

@@ -160,17 +160,6 @@ def run_analysis(
 
             if importance_map:
                 metadata["feature_importance"] = importance_map
-                threshold = preprocessing.get("feature_selection_threshold")
-                if threshold is not None:
-                    selected_features = [
-                        col for col, score in importance_map.items() if score >= threshold
-                    ]
-                    if selected_features:
-                        X_model = X_model[selected_features]
-                        metadata["selected_features"] = selected_features
-                        metadata["dropped_features"] = [
-                            col for col in importance_map if col not in selected_features
-                        ]
 
     if run_ml and label_col and label_col in result_df.columns:
         y = result_df[label_col].copy()

@@ -58,17 +58,21 @@ export function useGridEditor(initialData: GridRow[]) {
     closeContextMenu();
   }, [closeContextMenu]);
 
-  const handleDeleteColumn = useCallback(() => {
-    if (!contextMenu.colId) return;
-    const colId = contextMenu.colId;
+  const removeColumn = useCallback((colId: string) => {
+    if (!colId) return;
     setLocalRowData((prev) => prev.map((row) => {
       const nr = { ...row };
       delete nr[colId];
       return nr;
     }));
     setExtraColumns((prev) => prev.filter((c) => c !== colId));
+  }, []);
+
+  const handleDeleteColumn = useCallback(() => {
+    if (!contextMenu.colId) return;
+    removeColumn(contextMenu.colId);
     closeContextMenu();
-  }, [contextMenu.colId, closeContextMenu]);
+  }, [contextMenu.colId, closeContextMenu, removeColumn]);
 
   const handleClearCell = useCallback(() => {
     if (contextMenu.rowIndex !== null && contextMenu.colId) {
@@ -100,6 +104,7 @@ export function useGridEditor(initialData: GridRow[]) {
     handleDeleteRow,
     handleInsertColumn,
     handleDeleteColumn,
+    removeColumn,
     handleClearCell,
     columnKeys,
   };

@@ -16,9 +16,9 @@ export type MappingLike = {
 };
 
 export type WorkflowSettingsLike = {
-  use_case: 'classification' | 'prediction' | 'anomaly_detection' | 'recommendation' | 'clustering' | 'noise_reduction';
+  use_case: 'classification' | 'prediction' | 'anomaly_detection' | 'clustering';
   algorithm: string;
-  params: Record<string, any>;
+  params: Record<string, unknown>;
 };
 
 export function getUseCaseDefaults(useCase: string) {
@@ -37,14 +37,8 @@ export function getUseCaseDefaults(useCase: string) {
   if (useCase === 'anomaly_detection') {
     return { algorithm: 'isolation_forest', params: { contamination: 0.1 } };
   }
-  if (useCase === 'recommendation') {
-    return { algorithm: 'popularity_baseline', params: { top_k: 5 } };
-  }
   if (useCase === 'clustering') {
     return { algorithm: 'kmeans', params: { cluster_count: 3, eps: 0.8, min_samples: 5 } };
-  }
-  if (useCase === 'noise_reduction') {
-    return { algorithm: 'isolation_forest', params: { apply_mode: 'preview', contamination: 0.1, missing_row_threshold: 0.5 } };
   }
   return getUseCaseDefaults('classification');
 }
@@ -73,7 +67,7 @@ export function useWorkflowSettings(
     setWorkflowSettings((current) => ({ ...current, algorithm }));
   }, [setWorkflowSettings]);
 
-  const handleParamChange = useCallback((key: string, value: any) => {
+  const handleParamChange = useCallback((key: string, value: unknown) => {
     setWorkflowSettings((current) => ({
       ...current,
       params: { ...current.params, [key]: value },

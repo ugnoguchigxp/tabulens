@@ -5,7 +5,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
-from sklearn.inspection import permutation_importance
 
 from app.models.schemas import BoundaryAxisRange, BoundaryGridCell, BoundaryPoint, BoundarySnapshot, JobRequest
 from app.services.ml.classifier import _build_model
@@ -47,17 +46,6 @@ def build_boundary_snapshot(
         raise ValueError("Boundary explorer is only available for classification jobs")
     if y.nunique(dropna=True) < 2:
         raise ValueError("Boundary explorer requires at least two classes")
-
-    if request.run_feature_selection:
-        x_model = _apply_feature_selection(
-            x_model=x_model,
-            y=y,
-            algorithm=getattr(request.algorithm, "value", str(request.algorithm)),
-            preprocessing=request.preprocessing.model_dump() if hasattr(request.preprocessing, "model_dump") else request.preprocessing.dict(),
-        )
-
-    if x_model.shape[1] < 2:
-        raise ValueError("Boundary explorer requires at least two usable features after feature selection")
 
     model = _build_model(getattr(request.algorithm, "value", str(request.algorithm)), y, force_classification=True)
     model.fit(x_model, y)
@@ -260,61 +248,6 @@ def _is_classification_target(y: pd.Series) -> bool:
         or pd.api.types.is_string_dtype(y)
         or str(y.dtype).startswith("category")
     )
-
-
-def _apply_feature_selection(
-    *,
-    x_model: pd.DataFrame,
-    y: pd.Series,
-    algorithm: str,
-    preprocessing: dict[str, Any],
-) -> pd.DataFrame:
-    importance_is_classification = _is_classification_target(y)
-    if importance_is_classification:
-        importance_target = y.astype(str)
-    else:
-        importance_target = pd.to_numeric(y, errors="coerce").fillna(0)
-
-    importance_model = _build_model(
-        algorithm,
-        pd.Series(importance_target, index=x_model.index),
-        force_classification=importance_is_classification,
-    )
-    if not hasattr(importance_model, "fit"):
-        return x_model
-
-    importance_model.fit(x_model, importance_target)
-    if hasattr(importance_model, "feature_importances_"):
-        importance_map = {
-            column: float(score)
-            for column, score in zip(x_model.columns, importance_model.feature_importances_)
-        }
-    else:
-        scoring = "accuracy" if importance_is_classification else "r2"
-        try:
-            permutation = permutation_importance(
-                importance_model,
-                x_model,
-                importance_target,
-                n_repeats=10,
-                random_state=42,
-                scoring=scoring,
-            )
-            importance_map = {
-                column: float(max(0.0, score))
-                for column, score in zip(x_model.columns, permutation.importances_mean)
-            }
-        except Exception:
-            importance_map = {}
-
-    threshold = preprocessing.get("feature_selection_threshold")
-    if threshold is None or not importance_map:
-        return x_model
-
-    selected_features = [col for col, score in importance_map.items() if score >= threshold]
-    if not selected_features:
-        return x_model
-    return x_model[selected_features]
 
 
 def _estimate_confidence(model: Any, features: pd.DataFrame | np.ndarray) -> np.ndarray:

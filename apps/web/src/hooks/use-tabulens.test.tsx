@@ -1,7 +1,7 @@
 import { renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useUploadWorkbook, useJobResults, useApplyProposal, useDiscardProposal } from './use-tabulens';
+import { useUploadWorkbook, useJobResults } from './use-tabulens';
 import { apiClient } from '@/lib/api-client';
 import type { ReactNode } from 'react';
 
@@ -9,8 +9,6 @@ vi.mock('@/lib/api-client', () => ({
   apiClient: {
     uploadWorkbook: vi.fn(),
     getJobRows: vi.fn(),
-    applyProposal: vi.fn(),
-    discardProposal: vi.fn(),
   },
 }));
 
@@ -52,19 +50,4 @@ describe('use-tabulens hooks', () => {
     expect(result.current.data).toEqual(mockRows);
   });
 
-  it('useApplyProposal works', async () => {
-    (apiClient.applyProposal as any).mockResolvedValue({} as any);
-    const { result } = renderHook(() => useApplyProposal('job-123'), { wrapper: createWrapper() });
-    
-    await result.current.mutateAsync('prop-1');
-    expect(apiClient.applyProposal).toHaveBeenCalledWith('job-123', 'prop-1');
-  });
-
-  it('useDiscardProposal works', async () => {
-    (apiClient.discardProposal as any).mockResolvedValue({} as any);
-    const { result } = renderHook(() => useDiscardProposal('job-123'), { wrapper: createWrapper() });
-    
-    await result.current.mutateAsync('prop-1');
-    expect(apiClient.discardProposal).toHaveBeenCalledWith('job-123', 'prop-1');
-  });
 });

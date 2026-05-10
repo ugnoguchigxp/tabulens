@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -309,6 +309,96 @@ class ModelReviewProposalListResponse(BaseModel):
 
 class ModelReviewRerunRequest(BaseModel):
     proposal_ids: List[str] = Field(default_factory=list)
+
+
+class DataProfileColumn(BaseModel):
+    name: str
+    inferred_type: str
+    missing_rate: float = 0.0
+    unique_ratio: float = 0.0
+    low_variance: bool = False
+    likely_identifier: bool = False
+    warning_flags: List[str] = Field(default_factory=list)
+
+
+class DataProfile(BaseModel):
+    row_count: int = 0
+    column_count: int = 0
+    missing_rate_overall: float = 0.0
+    columns: List[DataProfileColumn] = Field(default_factory=list)
+
+
+class TargetFeasibility(BaseModel):
+    target_column: Optional[str] = None
+    target_kind: str = "unknown"
+    feasibility: str = "unknown"
+    baseline_metrics: Dict[str, float] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ModelSweepItem(BaseModel):
+    algorithm: str
+    status: str = "success"
+    primary_metric: Optional[float] = None
+    train_metric: Optional[float] = None
+    test_metric: Optional[float] = None
+    gap: Optional[float] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+    failure_reason: Optional[str] = None
+
+
+class ModelSweepResult(BaseModel):
+    task_type: str = "unknown"
+    items: List[ModelSweepItem] = Field(default_factory=list)
+    best_algorithm: Optional[str] = None
+
+
+class ExplorationNextAction(BaseModel):
+    action: Literal[
+        "inspect_features",
+        "exclude_risky_columns",
+        "change_target",
+        "collect_more_rows",
+        "try_balanced_class_weight",
+        "try_regularized_model",
+        "inspect_clusters",
+        "inspect_outliers",
+    ]
+    reason: str
+    priority: Literal["high", "medium", "low"] = "medium"
+
+
+class ExplorationEvaluation(BaseModel):
+    signal_strength: Literal["none", "weak", "medium", "strong", "unknown"] = "unknown"
+    model_viability: Literal["not_useful", "unclear", "promising", "strong", "unknown"] = "unknown"
+    overall_verdict: Literal["try_more", "usable_signal", "needs_better_features", "needs_better_target", "not_enough_data"] = "try_more"
+    confidence: float = 0.0
+    reasons: List[str] = Field(default_factory=list)
+    risk_flags: List[str] = Field(default_factory=list)
+    next_actions: List[ExplorationNextAction] = Field(default_factory=list)
+
+
+class ExplorationRequest(BaseModel):
+    workbook_id: str
+    sheet_name: str
+    mapping: ColumnMapping = Field(default_factory=ColumnMapping)
+    task_type: str = "auto"
+    preprocessing: PreprocessingSettings = Field(default_factory=PreprocessingSettings)
+    split_mode: str = "ratio"
+    test_size: float = 0.2
+    train_size: Optional[float] = None
+    random_state: int = 42
+    shuffle: bool = True
+
+
+class ExplorationResponse(BaseModel):
+    workbook_id: str
+    sheet_name: str
+    data_profile: DataProfile
+    target_feasibility: TargetFeasibility
+    model_sweep: ModelSweepResult
+    evaluation: ExplorationEvaluation
 
 
 class BoundaryAxisRange(BaseModel):
