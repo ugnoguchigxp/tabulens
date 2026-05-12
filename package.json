@@ -1,0 +1,10 @@
+{
+  "name": "tabulens-root",
+  "private": true,
+  "scripts": {
+    "start": "./start.sh",
+    "build": "cd apps/web && pnpm build",
+    "api": "cd apps/api && source .venv/bin/activate && uvicorn app.main:app --reload",
+    "web": "cd apps/web && pnpm dev"
+  }
+}

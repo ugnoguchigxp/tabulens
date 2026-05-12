@@ -17,6 +17,21 @@ class WorkbookUploadResponse(BaseModel):
     workbook_id: str
     sheets: List[SheetInfo]
 
+class WorkbookFormulaCell(BaseModel):
+    address: str
+    formula: str
+    cached_value: Any = None
+
+
+class WorkbookFormulaSheet(BaseModel):
+    name: str
+    cells: List[WorkbookFormulaCell] = Field(default_factory=list)
+
+
+class WorkbookFormulaMetadataResponse(BaseModel):
+    workbook_id: str
+    sheets: List[WorkbookFormulaSheet] = Field(default_factory=list)
+
 
 class SheetRowsResponse(BaseModel):
     workbook_id: str
@@ -107,6 +122,20 @@ class ModelWorkflowResponse(BaseModel):
     rows: List[dict] = Field(default_factory=list)
     metrics: WorkflowMetrics = Field(default_factory=WorkflowMetrics)
     metadata: dict = Field(default_factory=dict)
+
+class WorkflowPredictRequest(BaseModel):
+    rows: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkflowPredictItem(BaseModel):
+    value: Any = None
+    confidence: Optional[float] = None
+
+
+class WorkflowPredictResponse(BaseModel):
+    workflow_id: str
+    predictions: List[WorkflowPredictItem] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowRowsResponse(BaseModel):

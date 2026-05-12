@@ -67,6 +67,40 @@ def test_sheet_rows_sheet_not_found_for_xlsx():
     assert rows_response.status_code == 404
     assert "Sheet not found" in rows_response.json()["error"]["message"]
 
+
+def test_workbook_formulas_metadata_for_xlsx():
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        pd.DataFrame({"a": [1], "b": [2]}).to_excel(writer, sheet_name="Sheet1", index=False)
+    excel_buffer.seek(0)
+
+    upload_response = client.post(
+        "/api/workbooks/upload",
+        files={"file": ("test.xlsx", excel_buffer.read(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+    )
+    assert upload_response.status_code == 200
+    workbook_id = upload_response.json()["workbook_id"]
+
+    # add formula after upload so metadata endpoint has real formula content
+    from openpyxl import load_workbook
+    from app.core.paths import UPLOAD_DIR
+    from app.services.workbook_formula_store import workbook_formula_metadata_path
+
+    workbook_path = UPLOAD_DIR / f"{workbook_id}.xlsx"
+    wb = load_workbook(workbook_path)
+    ws = wb["Sheet1"]
+    ws["C2"] = "=A2+B2"
+    wb.save(workbook_path)
+    workbook_formula_metadata_path(workbook_id).unlink(missing_ok=True)
+
+    formulas_response = client.get(f"/api/workbooks/{workbook_id}/formulas")
+    assert formulas_response.status_code == 200
+    payload = formulas_response.json()
+    assert payload["workbook_id"] == workbook_id
+    assert isinstance(payload["sheets"], list)
+    assert payload["sheets"][0]["name"] == "Sheet1"
+    assert any(cell["formula"] == "=A2+B2" for cell in payload["sheets"][0]["cells"])
+
 def test_upload_invalid_file():
     response = client.post(
         "/api/workbooks/upload",

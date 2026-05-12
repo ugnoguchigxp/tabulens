@@ -1,6 +1,17 @@
-import { useState, useCallback, useMemo } from 'react';
-
-type GridRow = Record<string, unknown>;
+import { useState, useCallback, useEffect, useMemo } from 'react';
+import {
+  applyPredictResult,
+  buildWorkbookState,
+  getCellAddressA1,
+  getCellFormula,
+  getCellRawInput as getWorkbookCellRawInput,
+  getPendingPredictRequests,
+  getSheetRows,
+  manualRecalculate as manualRecalculateWorkbook,
+  setWorkbookPredictContext,
+  updateWorkbookCell,
+} from '@/calc-engine/workbook-state';
+import type { GridRow, WorkbookState } from '@/calc-engine/types';
 
 interface ContextMenuState {
   x: number;
@@ -10,8 +21,31 @@ interface ContextMenuState {
   colId: string | null;
 }
 
-export function useGridEditor(initialData: GridRow[]) {
-  const [localRowData, setLocalRowData] = useState<GridRow[]>(initialData);
+type GridRowStateUpdater = GridRow[] | ((prev: GridRow[]) => GridRow[]);
+
+interface GridEditorOptions {
+  workflowId?: string | null;
+  predictResolver?: (featureValues: unknown[]) => unknown;
+}
+
+export function useGridEditor(initialData: GridRow[], activeSheetName = 'Sheet1', options: GridEditorOptions = {}) {
+  const workflowId = options.workflowId ?? null;
+  const predictResolver = options.predictResolver;
+  const [localRowDataState, setLocalRowDataState] = useState<GridRow[]>(() => {
+    const workbook = setWorkbookPredictContext(
+      buildWorkbookState(activeSheetName, initialData),
+      workflowId,
+      predictResolver,
+    );
+    return getSheetRows(workbook, activeSheetName);
+  });
+  const [workbookState, setWorkbookState] = useState<WorkbookState>(() => (
+    setWorkbookPredictContext(
+      buildWorkbookState(activeSheetName, initialData),
+      workflowId,
+      predictResolver,
+    )
+  ));
   const [extraColumns, setExtraColumns] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     x: 0,
@@ -20,6 +54,36 @@ export function useGridEditor(initialData: GridRow[]) {
     rowIndex: null,
     colId: null,
   });
+  const localRowData = localRowDataState;
+
+  const resolvePendingPredicts = useCallback((workbook: WorkbookState): WorkbookState => {
+    let nextWorkbook = workbook;
+    const pending = getPendingPredictRequests(nextWorkbook);
+    pending.forEach(({ cellKey, featureValues }) => {
+      if (workflowId == null || !predictResolver) {
+        nextWorkbook = applyPredictResult(nextWorkbook, cellKey, featureValues, '#PREDICT_ERR');
+        return;
+      }
+      const predicted = predictResolver(featureValues);
+      nextWorkbook = applyPredictResult(nextWorkbook, cellKey, featureValues, predicted);
+    });
+    return nextWorkbook;
+  }, [workflowId, predictResolver]);
+
+  const setLocalRowData = useCallback((nextState: GridRowStateUpdater) => {
+    setLocalRowDataState((prev) => {
+      const nextRows = typeof nextState === 'function'
+        ? nextState(prev)
+        : nextState;
+      const workbook = setWorkbookPredictContext(
+        buildWorkbookState(activeSheetName, nextRows),
+        workflowId,
+        predictResolver,
+      );
+      setWorkbookState(workbook);
+      return getSheetRows(workbook, activeSheetName);
+    });
+  }, [activeSheetName, workflowId, predictResolver]);
 
   const closeContextMenu = useCallback(() => {
     setContextMenu((prev) => ({ ...prev, visible: false }));
@@ -37,7 +101,7 @@ export function useGridEditor(initialData: GridRow[]) {
       return newData;
     });
     closeContextMenu();
-  }, [contextMenu.rowIndex, localRowData, closeContextMenu]);
+  }, [contextMenu.rowIndex, localRowData, closeContextMenu, setLocalRowData]);
 
   const handleDeleteRow = useCallback(() => {
     if (contextMenu.rowIndex === null) return;
@@ -47,7 +111,7 @@ export function useGridEditor(initialData: GridRow[]) {
       return newData;
     });
     closeContextMenu();
-  }, [contextMenu.rowIndex, closeContextMenu]);
+  }, [contextMenu.rowIndex, closeContextMenu, setLocalRowData]);
 
   const handleInsertColumn = useCallback(() => {
     const colName = prompt('Enter column name:');
@@ -56,7 +120,7 @@ export function useGridEditor(initialData: GridRow[]) {
       setLocalRowData((prev) => prev.map((row) => ({ ...row, [colName]: null })));
     }
     closeContextMenu();
-  }, [closeContextMenu]);
+  }, [closeContextMenu, setLocalRowData]);
 
   const removeColumn = useCallback((colId: string) => {
     if (!colId) return;
@@ -66,7 +130,7 @@ export function useGridEditor(initialData: GridRow[]) {
       return nr;
     }));
     setExtraColumns((prev) => prev.filter((c) => c !== colId));
-  }, []);
+  }, [setLocalRowData]);
 
   const handleDeleteColumn = useCallback(() => {
     if (!contextMenu.colId) return;
@@ -84,7 +148,7 @@ export function useGridEditor(initialData: GridRow[]) {
       });
     }
     closeContextMenu();
-  }, [contextMenu, closeContextMenu]);
+  }, [contextMenu, closeContextMenu, setLocalRowData]);
 
   const columnKeys = useMemo(() => {
     if (localRowData.length > 0) {
@@ -92,6 +156,55 @@ export function useGridEditor(initialData: GridRow[]) {
     }
     return [];
   }, [localRowData]);
+
+  const updateCellInput = useCallback((rowIndex: number, colId: string, value: unknown) => {
+    setWorkbookState((prev) => {
+      const workbookWithContext = setWorkbookPredictContext(prev, workflowId, predictResolver);
+      let nextWorkbook = updateWorkbookCell(workbookWithContext, activeSheetName, rowIndex, colId, value);
+      nextWorkbook = resolvePendingPredicts(nextWorkbook);
+      setLocalRowDataState(getSheetRows(nextWorkbook, activeSheetName));
+      return nextWorkbook;
+    });
+  }, [activeSheetName, workflowId, predictResolver, resolvePendingPredicts]);
+
+  const manualRecalculate = useCallback(() => {
+    setWorkbookState((prev) => {
+      const workbookWithContext = setWorkbookPredictContext(prev, workflowId, predictResolver);
+      let nextWorkbook = manualRecalculateWorkbook(workbookWithContext);
+      nextWorkbook = resolvePendingPredicts(nextWorkbook);
+      setLocalRowDataState(getSheetRows(nextWorkbook, activeSheetName));
+      return nextWorkbook;
+    });
+  }, [activeSheetName, workflowId, predictResolver, resolvePendingPredicts]);
+
+  useEffect(() => {
+    setWorkbookState((prev) => {
+      const workbookWithContext = setWorkbookPredictContext(prev, workflowId, predictResolver);
+      const nextWorkbook = resolvePendingPredicts(workbookWithContext);
+      setLocalRowDataState(getSheetRows(nextWorkbook, activeSheetName));
+      return nextWorkbook;
+    });
+  }, [workflowId, predictResolver, activeSheetName, resolvePendingPredicts]);
+
+  const getFormulaTooltip = useCallback((rowIndex: number, colId: string): string | null => {
+    const formula = getCellFormula(workbookState, activeSheetName, rowIndex, colId);
+    if (!formula) {
+      return null;
+    }
+    const address = getCellAddressA1(workbookState, activeSheetName, rowIndex, colId);
+    if (!address) {
+      return formula;
+    }
+    return `${address}: ${formula}`;
+  }, [workbookState, activeSheetName]);
+
+  const getCellRawInput = useCallback((rowIndex: number, colId: string): unknown => (
+    getWorkbookCellRawInput(workbookState, activeSheetName, rowIndex, colId)
+  ), [workbookState, activeSheetName]);
+
+  const getCellAddress = useCallback((rowIndex: number, colId: string): string | null => (
+    getCellAddressA1(workbookState, activeSheetName, rowIndex, colId)
+  ), [workbookState, activeSheetName]);
 
   return {
     localRowData,
@@ -107,5 +220,10 @@ export function useGridEditor(initialData: GridRow[]) {
     removeColumn,
     handleClearCell,
     columnKeys,
+    updateCellInput,
+    manualRecalculate,
+    getCellRawInput,
+    getCellAddress,
+    getFormulaTooltip,
   };
 }

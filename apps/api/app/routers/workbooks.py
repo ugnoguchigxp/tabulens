@@ -2,8 +2,20 @@ import os
 import uuid
 import pandas as pd
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query
-from app.models.schemas import WorkbookUploadResponse, SheetInfo, ColumnInfo, SheetRowsResponse, SheetProfileResponse
+from openpyxl import load_workbook as load_openpyxl_workbook
+from app.models.schemas import (
+    WorkbookUploadResponse,
+    SheetInfo,
+    ColumnInfo,
+    SheetRowsResponse,
+    SheetProfileResponse,
+    WorkbookFormulaMetadataResponse,
+)
 from app.core.paths import UPLOAD_DIR
+from app.services.workbook_formula_store import (
+    load_workbook_formula_metadata,
+    save_workbook_formula_metadata,
+)
 
 router = APIRouter()
 
@@ -28,10 +40,13 @@ async def upload_workbook(file: UploadFile = File(...)):
             for sheet_name in excel_file.sheet_names:
                 df = pd.read_excel(file_path, sheet_name=sheet_name)
                 sheets_info.append(_process_dataframe(df, sheet_name))
+            formula_metadata = _extract_formula_metadata(file_path, workbook_id)
+            save_workbook_formula_metadata(workbook_id, formula_metadata)
         else:
             # Handle CSV as a single sheet
             df = pd.read_csv(file_path)
             sheets_info.append(_process_dataframe(df, "CSV Data"))
+            save_workbook_formula_metadata(workbook_id, {"workbook_id": workbook_id, "sheets": []})
             
         return WorkbookUploadResponse(
             workbook_id=workbook_id,
@@ -76,6 +91,24 @@ async def preview_sheet(workbook_id: str, sheet_name: str):
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Error creating preview: {exc}") from exc
     raise HTTPException(status_code=404, detail="Workbook not found")
+
+
+@router.get("/{workbook_id}/formulas", response_model=WorkbookFormulaMetadataResponse)
+async def workbook_formulas(workbook_id: str):
+    metadata = load_workbook_formula_metadata(workbook_id)
+    if metadata is not None:
+        return WorkbookFormulaMetadataResponse.model_validate(metadata)
+
+    file_path = _resolve_workbook_path(workbook_id)
+    if file_path is None:
+        raise HTTPException(status_code=404, detail="Workbook not found")
+
+    if str(file_path).endswith(".xlsx"):
+        metadata = _extract_formula_metadata(file_path, workbook_id)
+    else:
+        metadata = {"workbook_id": workbook_id, "sheets": []}
+    save_workbook_formula_metadata(workbook_id, metadata)
+    return WorkbookFormulaMetadataResponse.model_validate(metadata)
 
 
 @router.get("/{workbook_id}/sheets/{sheet_name}/rows", response_model=SheetRowsResponse)
@@ -145,6 +178,41 @@ def _load_workbook(file_path, workbook_id: str) -> WorkbookUploadResponse:
         df = pd.read_csv(file_path)
         sheets_info.append(_process_dataframe(df, "CSV Data"))
     return WorkbookUploadResponse(workbook_id=workbook_id, sheets=sheets_info)
+
+
+def _resolve_workbook_path(workbook_id: str):
+    for ext in [".xlsx", ".csv"]:
+        file_path = UPLOAD_DIR / f"{workbook_id}{ext}"
+        if file_path.exists():
+            return file_path
+    return None
+
+
+def _extract_formula_metadata(file_path, workbook_id: str) -> dict:
+    workbook = load_openpyxl_workbook(file_path, data_only=False)
+    workbook_cached = load_openpyxl_workbook(file_path, data_only=True)
+    sheets: list[dict] = []
+
+    for worksheet in workbook.worksheets:
+        cached_sheet = workbook_cached[worksheet.title]
+        cells: list[dict] = []
+        for row in worksheet.iter_rows():
+            for cell in row:
+                value = cell.value
+                if value is None:
+                    continue
+                if cell.data_type != "f" and not (isinstance(value, str) and value.startswith("=")):
+                    continue
+                formula_text = value if isinstance(value, str) and value.startswith("=") else f"={value}"
+                cached_value = cached_sheet[cell.coordinate].value
+                cells.append({
+                    "address": cell.coordinate,
+                    "formula": formula_text,
+                    "cached_value": cached_value,
+                })
+        sheets.append({"name": worksheet.title, "cells": cells})
+
+    return {"workbook_id": workbook_id, "sheets": sheets}
 
 
 def _load_sheet_or_404(workbook_id: str, sheet_name: str) -> pd.DataFrame:

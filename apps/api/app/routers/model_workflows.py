@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -14,13 +15,23 @@ from app.models.schemas import (
     BoundarySnapshot,
     ModelWorkflowRequest,
     ModelWorkflowResponse,
+    WorkflowPredictItem,
+    WorkflowPredictRequest,
+    WorkflowPredictResponse,
     WorkflowMetrics,
     WorkflowRowsResponse,
 )
 from app.services.exploration_store import load_exploration_result
-from app.services.job_store import load_job_state, save_job_state, save_result_artifacts
+from app.services.job_store import (
+    load_job_state,
+    load_model_artifacts,
+    save_job_state,
+    save_model_artifacts,
+    save_result_artifacts,
+)
 from app.services.ml.boundary import build_boundary_snapshot
 from app.services.ml.model_workflows import run_model_workflow
+from app.services.workbook_formula_store import load_workbook_formula_metadata
 from app.services.workbook_loader import load_workbook_sheet, resolve_workbook_path
 
 router = APIRouter()
@@ -36,6 +47,9 @@ async def run_workflow(request: ModelWorkflowRequest):
         workflow_id = str(uuid.uuid4())
         workflow_result = run_model_workflow(source_df, request, workflow_id)
         workflow_result.metadata.update(source_metadata)
+        artifact_path = None
+        if workflow_result.model_artifacts is not None:
+            artifact_path = save_model_artifacts(workflow_id, workflow_result.model_artifacts)
 
         current_csv_path, current_xlsx_path = save_result_artifacts(workflow_id, workflow_result.result_df, name="results")
         exploration_result = load_exploration_result(request.workbook_id, request.sheet_name)
@@ -43,6 +57,8 @@ async def run_workflow(request: ModelWorkflowRequest):
             workflow_id,
             workflow_result.result_df,
             workflow_result.metrics,
+            workbook_id=request.workbook_id,
+            sheet_name=request.sheet_name,
             exploration_result=exploration_result,
         )
 
@@ -63,6 +79,7 @@ async def run_workflow(request: ModelWorkflowRequest):
             "result_path": str(current_csv_path),
             "result_xlsx_path": str(current_xlsx_path),
             "export_xlsx_path": str(export_path),
+            "model_artifact_path": str(artifact_path) if artifact_path else None,
         }
         save_job_state(state)
         workflow_db[workflow_id] = state
@@ -112,23 +129,26 @@ async def get_workflow_metrics(workflow_id: str):
 async def get_workflow_boundary(workflow_id: str):
     state = _get_workflow_state(workflow_id)
     request = ModelWorkflowRequest.model_validate(state["request"])
-    if request.use_case.value != "classification":
-        raise HTTPException(status_code=400, detail="Boundary graph is only available for classification workflows")
+    if request.use_case.value not in {"classification", "clustering"}:
+        raise HTTPException(status_code=400, detail="Boundary graph is only available for classification or clustering workflows")
 
     source_df, _, resolved_request = _load_workflow_source(request)
     result_df = _read_dataframe(_resolve_result_path(state))
     feature_columns = [column for column in resolved_request.mapping.feature_columns if column and column != resolved_request.mapping.label_column]
     if len(feature_columns) < 2:
         raise HTTPException(status_code=400, detail="Boundary graph requires at least 2 feature columns")
-    if not resolved_request.mapping.label_column:
+    if request.use_case.value == "classification" and not resolved_request.mapping.label_column:
         raise HTTPException(status_code=400, detail="Boundary graph requires a label column")
-    snapshot = build_boundary_snapshot(
-        source_df=source_df,
-        result_df=result_df,
-        label_column=resolved_request.mapping.label_column,
-        feature_columns=feature_columns,
-    )
-    return snapshot
+    try:
+        snapshot = build_boundary_snapshot(
+            job_id=workflow_id,
+            source_df=source_df,
+            result_df=result_df,
+            request=resolved_request,
+        )
+        return snapshot
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{workflow_id}/export.xlsx")
@@ -144,6 +164,53 @@ async def export_workflow(workflow_id: str):
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"{workflow_id}-workflow.xlsx",
+    )
+
+
+@router.post("/{workflow_id}/predict", response_model=WorkflowPredictResponse)
+async def predict_workflow(workflow_id: str, request: WorkflowPredictRequest):
+    state = _get_workflow_state(workflow_id)
+    if not request.rows:
+        return WorkflowPredictResponse(workflow_id=workflow_id, predictions=[], metadata={})
+
+    artifacts = load_model_artifacts(workflow_id)
+    if artifacts is None:
+        raise HTTPException(status_code=409, detail="Model artifacts are not available for this workflow")
+
+    feature_columns = artifacts.get("feature_columns") or []
+    if not isinstance(feature_columns, list) or len(feature_columns) == 0:
+        raise HTTPException(status_code=409, detail="Invalid model artifacts: feature columns are missing")
+
+    input_df = pd.DataFrame(request.rows)
+    missing_columns = [column for column in feature_columns if column not in input_df.columns]
+    if missing_columns:
+        raise HTTPException(status_code=400, detail=f"Feature columns mismatch: missing {missing_columns}")
+
+    preprocessor = artifacts.get("preprocessor")
+    model = artifacts.get("model")
+    if preprocessor is None or model is None:
+        raise HTTPException(status_code=409, detail="Invalid model artifacts: model or preprocessor is missing")
+
+    transformed = preprocessor.transform(input_df[feature_columns].copy())
+    predicted = model.predict(transformed)
+    confidence: np.ndarray | None = None
+    if hasattr(model, "predict_proba"):
+        confidence = np.max(model.predict_proba(transformed), axis=1)
+
+    predictions: list[WorkflowPredictItem] = []
+    for index, value in enumerate(predicted):
+        score = float(confidence[index]) if confidence is not None else None
+        predictions.append(WorkflowPredictItem(value=value.item() if hasattr(value, "item") else value, confidence=score))
+
+    return WorkflowPredictResponse(
+        workflow_id=workflow_id,
+        predictions=predictions,
+        metadata={
+            "task_type": artifacts.get("task_type"),
+            "feature_columns": feature_columns,
+            "algorithm": artifacts.get("algorithm"),
+            "source_workbook_id": state.get("workbook_id"),
+        },
     )
 
 
@@ -199,6 +266,8 @@ def _save_workflow_export(
     workflow_id: str,
     result_df: pd.DataFrame,
     metrics: dict[str, Any],
+    workbook_id: str,
+    sheet_name: str,
     exploration_result: dict[str, Any] | None = None,
 ) -> Path:
     export_path = RESULT_DIR / workflow_id / "workflow_export.xlsx"
@@ -221,6 +290,7 @@ def _save_workflow_export(
             pd.DataFrame(rows).to_excel(writer, sheet_name="evaluation", index=False)
         else:
             pd.DataFrame([{"key": "evaluation_not_available", "value": True}]).to_excel(writer, sheet_name="evaluation", index=False)
+        _write_formula_metadata_sheet(writer, workbook_id, sheet_name)
     return export_path
 
 
@@ -231,3 +301,27 @@ def _read_dataframe(path: Path) -> pd.DataFrame:
 def _dataframe_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     safe_df = df.replace([float("inf"), float("-inf")], pd.NA).where(pd.notna(df), None)
     return safe_df.to_dict(orient="records")
+
+
+def _write_formula_metadata_sheet(writer: pd.ExcelWriter, workbook_id: str, sheet_name: str) -> None:
+    metadata = load_workbook_formula_metadata(workbook_id) or {"workbook_id": workbook_id, "sheets": []}
+    rows: list[dict[str, Any]] = []
+    for sheet in metadata.get("sheets", []):
+        current_sheet_name = sheet.get("name")
+        for cell in sheet.get("cells", []):
+            rows.append({
+                "workbook_id": workbook_id,
+                "sheet_name": current_sheet_name,
+                "active_sheet": sheet_name,
+                "address": cell.get("address"),
+                "formula": cell.get("formula"),
+                "cached_value": cell.get("cached_value"),
+            })
+    pd.DataFrame(rows if rows else [{
+        "workbook_id": workbook_id,
+        "sheet_name": sheet_name,
+        "active_sheet": sheet_name,
+        "address": None,
+        "formula": None,
+        "cached_value": None,
+    }]).to_excel(writer, sheet_name="formulas", index=False)

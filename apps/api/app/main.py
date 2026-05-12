@@ -6,6 +6,9 @@ from app.middleware.secure_headers import SecureHeadersMiddleware
 from app.middleware.error_handler import global_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
 
 app = FastAPI(title="TabuLens API")
 
@@ -35,6 +38,30 @@ app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(model_workflows.router, prefix="/api/model-workflows", tags=["model-workflows"])
 app.include_router(explorations.router, prefix="/api/explorations", tags=["explorations"])
 
-@app.get("/")
+@app.get("/api")
 async def root():
     return {"message": "Welcome to TabuLens API"}
+
+# --- Static File Serving ---
+# Adjust this path based on your deployment structure
+# This assumes apps/web/dist exists (built via pnpm build)
+frontend_path = os.path.join(os.path.dirname(__file__), "..", "..", "web", "dist")
+
+if os.path.exists(frontend_path):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_path, "assets")), name="static")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # If it's an API call that wasn't matched, it should return 404 naturally
+        # but for SPA routing, we serve index.html for non-asset/non-api paths
+        if full_path.startswith("api"):
+            return {"detail": "Not Found"}
+
+        index_file = os.path.join(frontend_path, "index.html")
+        if os.path.exists(index_file):
+            return FileResponse(index_file)
+        return {"detail": "Frontend not built. Run 'pnpm build' in apps/web."}
+else:
+    @app.get("/")
+    async def root_fallback():
+        return {"message": "TabuLens API is running. Frontend dist not found."}

@@ -44,14 +44,7 @@ def run_analysis(
         missing_method = preprocessing.get("handle_missing", "mean")
         for col in numeric_cols:
             numeric_series = pd.to_numeric(X_raw[col], errors="coerce")
-            if missing_method == "mean":
-                fill_value = numeric_series.mean()
-            elif missing_method == "median":
-                fill_value = numeric_series.median()
-            elif missing_method == "zero":
-                fill_value = 0
-            else:
-                fill_value = numeric_series.mean()
+            fill_value = _resolve_numeric_fill_value(numeric_series, missing_method)
             X_raw[col] = numeric_series.fillna(fill_value)
 
         for col in categorical_cols:
@@ -102,13 +95,22 @@ def run_analysis(
         X_model = pd.DataFrame(X_scaled, columns=X_model.columns, index=X_model.index)
 
     result_df = working_df.copy()
-    if run_cleansing and numeric_cols:
+    if run_cleansing:
+        # Reflect cleansing values directly into prepared rows so the grid shows
+        # imputed/re-encoded source values rather than keeping blanks.
+        for col in feature_cols:
+            if col in X_raw.columns:
+                result_df[col] = X_raw[col].values
+
         norm_prefix = preprocessing.get("normalization", "minmax")
-        if norm_prefix != "none":
+        if numeric_cols and norm_prefix != "none":
+            scaler = MinMaxScaler() if norm_prefix == "minmax" else StandardScaler()
+            scaled_numeric = scaler.fit_transform(X_raw[numeric_cols].apply(pd.to_numeric, errors="coerce"))
+            scaled_frame = pd.DataFrame(scaled_numeric, columns=numeric_cols, index=result_df.index)
             for col in numeric_cols:
-                scaler = MinMaxScaler() if norm_prefix == "minmax" else StandardScaler()
-                scaled_values = scaler.fit_transform(working_df[[col]].astype(float))
-                result_df[f"norm_{col}"] = scaled_values[:, 0]
+                result_df[col] = scaled_frame[col]
+                # Keep legacy normalized helper columns for compatibility.
+                result_df[f"norm_{col}"] = scaled_frame[col]
 
     if run_feature_selection and label_col and label_col in result_df.columns:
         y_for_importance = result_df[label_col].copy()
@@ -339,3 +341,15 @@ def _fallback_cluster_explanation(summary: dict) -> dict[str, str]:
         "reason": "Cluster needs manual inspection.",
         "recommended_action": "review_manually",
     }
+
+
+def _resolve_numeric_fill_value(series: pd.Series, method: str) -> float:
+    if method == "median":
+        fill_value = series.median()
+    elif method == "zero":
+        fill_value = 0.0
+    else:
+        fill_value = series.mean()
+    if pd.isna(fill_value):
+        return 0.0
+    return float(fill_value)

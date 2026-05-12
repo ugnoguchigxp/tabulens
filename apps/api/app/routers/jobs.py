@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from app.services.job_store import load_job_state, save_job_state, save_result_a
 from app.services.exploration_store import load_exploration_result
 from app.services.ml.boundary import build_boundary_snapshot
 from app.services.ml.classifier import run_analysis
+from app.services.workbook_formula_store import load_workbook_formula_metadata
 
 router = APIRouter()
 
@@ -42,6 +44,7 @@ async def create_job(request: JobRequest):
 
         job_id = str(uuid.uuid4())
         current_csv_path, current_xlsx_path = save_result_artifacts(job_id, result_df, name="current")
+        safe_metadata = _to_json_safe(metadata)
 
         state = {
             "job_id": job_id,
@@ -50,13 +53,13 @@ async def create_job(request: JobRequest):
             "sheet_name": request.sheet_name,
             "source_path": str(file_path),
             "request": request.model_dump(mode="json"),
-            "metadata": metadata,
+            "metadata": safe_metadata,
             "result_path": str(current_csv_path),
             "result_xlsx_path": str(current_xlsx_path),
         }
         save_job_state(state)
         jobs_db[job_id] = state
-        return JobResponse(job_id=job_id, status="completed", metadata=metadata)
+        return JobResponse(job_id=job_id, status="completed", metadata=safe_metadata)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
 
@@ -83,21 +86,23 @@ async def get_job_rows(job_id: str):
 @router.get("/{job_id}/boundary", response_model=BoundarySnapshot)
 async def get_job_boundary(job_id: str):
     state = _get_job_state(job_id)
-    request = state.get("request", {})
-    mapping = request.get("mapping") if isinstance(request, dict) else None
-    label_column = mapping.get("label_column") if isinstance(mapping, dict) else None
-    feature_columns = mapping.get("feature_columns") if isinstance(mapping, dict) else None
-    if not label_column or not isinstance(feature_columns, list):
-        raise HTTPException(status_code=400, detail="Boundary requires a label column and feature columns")
+    request_payload = state.get("request", {})
+    try:
+        request = JobRequest.model_validate(request_payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid job request payload for boundary: {exc}") from exc
     source_df = _load_source_df(Path(state["source_path"]), str(state["sheet_name"]))
     result_df = _read_dataframe(_resolve_result_path(state))
-    snapshot = build_boundary_snapshot(
-        source_df=source_df,
-        result_df=result_df,
-        label_column=str(label_column),
-        feature_columns=[str(item) for item in feature_columns],
-    )
-    return snapshot
+    try:
+        snapshot = build_boundary_snapshot(
+            job_id=str(state.get("job_id", job_id)),
+            source_df=source_df,
+            result_df=result_df,
+            request=request,
+        )
+        return snapshot
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{job_id}/export.xlsx")
@@ -158,7 +163,8 @@ def _load_source_df(file_path: Path, sheet_name: str) -> pd.DataFrame:
 
 
 def _dataframe_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
-    safe_df = df.replace([float("inf"), float("-inf")], pd.NA).where(pd.notna(df), None)
+    safe_df = df.replace([float("inf"), float("-inf")], pd.NA)
+    safe_df = safe_df.astype(object).where(pd.notna(safe_df), None)
     return safe_df.to_dict(orient="records")
 
 
@@ -185,3 +191,48 @@ def _write_prepare_export_with_evaluation(path: Path, state: dict[str, Any]) -> 
             pd.DataFrame(rows).to_excel(writer, sheet_name="evaluation", index=False)
         else:
             pd.DataFrame([{"key": "evaluation_not_available", "value": True}]).to_excel(writer, sheet_name="evaluation", index=False)
+        _write_formula_metadata_sheet(
+            writer=writer,
+            workbook_id=str(state.get("workbook_id", "")),
+            active_sheet=str(state.get("sheet_name", "")),
+        )
+
+
+def _write_formula_metadata_sheet(writer: pd.ExcelWriter, workbook_id: str, active_sheet: str) -> None:
+    metadata = load_workbook_formula_metadata(workbook_id) or {"workbook_id": workbook_id, "sheets": []}
+    rows: list[dict[str, Any]] = []
+    for sheet in metadata.get("sheets", []):
+        for cell in sheet.get("cells", []):
+            rows.append({
+                "workbook_id": workbook_id,
+                "sheet_name": sheet.get("name"),
+                "active_sheet": active_sheet,
+                "address": cell.get("address"),
+                "formula": cell.get("formula"),
+                "cached_value": cell.get("cached_value"),
+            })
+    pd.DataFrame(rows if rows else [{
+        "workbook_id": workbook_id,
+        "sheet_name": active_sheet,
+        "active_sheet": active_sheet,
+        "address": None,
+        "formula": None,
+        "cached_value": None,
+    }]).to_excel(writer, sheet_name="formulas", index=False)
+
+
+def _to_json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _to_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_json_safe(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return _to_json_safe(value.item())
+        except Exception:
+            return str(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    return str(value)

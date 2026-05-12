@@ -55,3 +55,50 @@ def test_run_analysis_categorical():
     )
     
     assert metadata["feature_count"] > 2 # because of one-hot
+
+
+def test_run_analysis_reflects_imputation_and_normalization_in_feature_columns():
+    df = pd.DataFrame({
+        "f1": [1.0, np.nan, 3.0],
+        "f2": [10.0, 20.0, np.nan],
+        "target": ["A", "B", "A"],
+    })
+
+    result_df, _ = run_analysis(
+        df=df,
+        feature_cols=["f1", "f2"],
+        label_col="target",
+        preprocessing={"handle_missing": "mean", "normalization": "minmax"},
+        run_cleansing=True,
+        run_feature_selection=False,
+        run_ml=False,
+    )
+
+    assert result_df["f1"].isna().sum() == 0
+    assert result_df["f2"].isna().sum() == 0
+    assert float(result_df["f1"].min()) >= 0.0
+    assert float(result_df["f1"].max()) <= 1.0
+    assert float(result_df["f2"].min()) >= 0.0
+    assert float(result_df["f2"].max()) <= 1.0
+    assert "norm_f1" in result_df.columns
+    assert "norm_f2" in result_df.columns
+
+
+def test_run_analysis_fills_all_missing_numeric_features_with_zero_when_mean_is_nan():
+    df = pd.DataFrame({
+        "f1": [np.nan, np.nan, np.nan],
+        "target": ["A", "A", "A"],
+    })
+
+    result_df, _ = run_analysis(
+        df=df,
+        feature_cols=["f1"],
+        label_col="target",
+        preprocessing={"handle_missing": "mean", "normalization": "none"},
+        run_cleansing=True,
+        run_feature_selection=False,
+        run_ml=False,
+    )
+
+    assert result_df["f1"].isna().sum() == 0
+    assert set(result_df["f1"].tolist()) == {0.0}

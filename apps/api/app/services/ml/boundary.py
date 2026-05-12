@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 
-from app.models.schemas import BoundaryAxisRange, BoundaryGridCell, BoundaryPoint, BoundarySnapshot, JobRequest
+from app.models.schemas import BoundaryAxisRange, BoundaryGridCell, BoundaryPoint, BoundarySnapshot, JobRequest, ModelWorkflowRequest
 from app.services.ml.classifier import _build_model
 
 
@@ -15,9 +15,19 @@ def build_boundary_snapshot(
     job_id: str,
     source_df: pd.DataFrame,
     result_df: pd.DataFrame,
-    request: JobRequest,
+    request: JobRequest | ModelWorkflowRequest,
     grid_resolution: int = 40,
 ) -> BoundarySnapshot:
+    use_case = str(getattr(getattr(request, "use_case", None), "value", "classification"))
+    if use_case == "clustering":
+        return _build_clustering_snapshot(
+            job_id=job_id,
+            source_df=source_df,
+            result_df=result_df,
+            request=request,
+            grid_resolution=grid_resolution,
+        )
+
     feature_cols = [col for col in request.mapping.feature_columns if col in source_df.columns]
     label_col = request.mapping.label_column if request.mapping.label_column in source_df.columns else None
 
@@ -25,14 +35,16 @@ def build_boundary_snapshot(
         raise ValueError("Boundary explorer requires at least one feature column")
     if not label_col:
         raise ValueError("Boundary explorer requires a label column")
-    if not request.run_ml:
+    run_ml = getattr(request, "run_ml", True)
+    if run_ml is False:
         raise ValueError("Boundary explorer requires ML to be enabled")
 
+    run_cleansing = getattr(request, "run_cleansing", True)
     working_df, x_model, numeric_cols = _prepare_analysis_inputs(
         source_df,
         feature_cols,
         request.preprocessing.model_dump() if hasattr(request.preprocessing, "model_dump") else request.preprocessing.dict(),
-        run_cleansing=request.run_cleansing,
+        run_cleansing=bool(run_cleansing),
     )
 
     if len(feature_cols) < 2:
@@ -131,6 +143,7 @@ def build_boundary_snapshot(
     }
     if hasattr(pca, "explained_variance_ratio_"):
         statistics["explained_variance_ratio"] = [float(value) for value in pca.explained_variance_ratio_]
+    statistics["graph_kind"] = "classification"
 
     return BoundarySnapshot(
         job_id=job_id,
@@ -141,6 +154,124 @@ def build_boundary_snapshot(
         grid_step_x=float((x_values[1] - x_values[0]) if len(x_values) > 1 else 0.0),
         grid_step_y=float((y_values[1] - y_values[0]) if len(y_values) > 1 else 0.0),
         class_labels=classes,
+        explained_variance_ratio=[float(value) for value in getattr(pca, "explained_variance_ratio_", [])],
+        points=points,
+        grid=grid,
+        statistics=statistics,
+    )
+
+
+def _build_clustering_snapshot(
+    *,
+    job_id: str,
+    source_df: pd.DataFrame,
+    result_df: pd.DataFrame,
+    request: JobRequest | ModelWorkflowRequest,
+    grid_resolution: int,
+) -> BoundarySnapshot:
+    feature_cols = [col for col in request.mapping.feature_columns if col in source_df.columns]
+    if len(feature_cols) < 2:
+        raise ValueError("Boundary explorer requires at least two feature columns")
+
+    run_cleansing = getattr(request, "run_cleansing", True)
+    working_df, x_model, numeric_cols = _prepare_analysis_inputs(
+        source_df,
+        feature_cols,
+        request.preprocessing.model_dump() if hasattr(request.preprocessing, "model_dump") else request.preprocessing.dict(),
+        run_cleansing=bool(run_cleansing),
+    )
+    if x_model.shape[1] < 2:
+        raise ValueError("Boundary explorer requires at least two usable features after preprocessing")
+
+    pca = PCA(n_components=2, random_state=42)
+    coords = pca.fit_transform(x_model)
+    x_min = float(coords[:, 0].min())
+    x_max = float(coords[:, 0].max())
+    y_min = float(coords[:, 1].min())
+    y_max = float(coords[:, 1].max())
+    x_span = max(x_max - x_min, 1e-6)
+    y_span = max(y_max - y_min, 1e-6)
+    x_margin = x_span * 0.18
+    y_margin = y_span * 0.18
+
+    result_indexed = result_df.copy()
+    if "_row_id" in result_indexed.columns:
+        result_indexed = result_indexed.set_index("_row_id", drop=False)
+    else:
+        result_indexed = result_indexed.copy()
+        result_indexed["_row_id"] = working_df["_row_id"].values
+        result_indexed = result_indexed.set_index("_row_id", drop=False)
+
+    points: list[BoundaryPoint] = []
+    for position, (row_id, row) in enumerate(working_df.set_index("_row_id", drop=False).iterrows()):
+        source_row = result_indexed.loc[row_id] if row_id in result_indexed.index else row
+        cluster_id = _stringify(source_row.get("_cluster_id")) or "noise"
+        distance_to_centroid = pd.to_numeric(source_row.get("_distance_to_centroid"), errors="coerce")
+        confidence_value = (
+            max(0.0, min(1.0, 1.0 - float(distance_to_centroid)))
+            if pd.notna(distance_to_centroid)
+            else (0.2 if cluster_id == "noise" else 0.7)
+        )
+        points.append(
+            BoundaryPoint(
+                row_id=int(row_id),
+                x=float(coords[position, 0]),
+                y=float(coords[position, 1]),
+                true_label=cluster_id,
+                predicted_label=cluster_id,
+                confidence=float(confidence_value),
+                is_misclassified=False,
+                is_outlier=bool(source_row.get("_is_noise", False) or cluster_id == "noise"),
+                is_island=bool(source_row.get("_is_small_cluster", False)),
+                review_priority=int(source_row.get("_review_priority", 0) or 0),
+                cluster_id=cluster_id,
+            )
+        )
+
+    class_labels = sorted({point.cluster_id or "unknown" for point in points})
+    centroids = _compute_cluster_centroids(points, class_labels)
+    x_values = np.linspace(x_min - x_margin, x_max + x_margin, grid_resolution)
+    y_values = np.linspace(y_min - y_margin, y_max + y_margin, grid_resolution)
+    grid_x, grid_y = np.meshgrid(x_values, y_values)
+    grid_points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+
+    grid: list[BoundaryGridCell] = []
+    for gx, gy in grid_points:
+        predicted_label, confidence = _predict_grid_cluster(float(gx), float(gy), centroids)
+        grid.append(
+            BoundaryGridCell(
+                x=float(gx),
+                y=float(gy),
+                predicted_label=predicted_label,
+                confidence=float(confidence),
+            )
+        )
+
+    statistics = {
+        "graph_kind": "clustering",
+        "point_count": int(len(points)),
+        "cluster_count": int(len([label for label in class_labels if label != "noise"])),
+        "noise_count": int(sum(1 for point in points if point.is_outlier)),
+        "misclassified_count": 0,
+        "low_confidence_count": int(sum(1 for point in points if (point.confidence or 0.0) < 0.4)),
+        "outlier_count": int(sum(1 for point in points if point.is_outlier)),
+        "island_count": int(sum(1 for point in points if point.is_island)),
+        "feature_count": int(x_model.shape[1]),
+        "numeric_feature_count": int(len(numeric_cols)),
+        "grid_point_count": int(len(grid)),
+    }
+    if hasattr(pca, "explained_variance_ratio_"):
+        statistics["explained_variance_ratio"] = [float(value) for value in pca.explained_variance_ratio_]
+
+    return BoundarySnapshot(
+        job_id=job_id,
+        projection="pca",
+        x_axis=BoundaryAxisRange(label="PCA 1", minimum=x_min - x_margin, maximum=x_max + x_margin),
+        y_axis=BoundaryAxisRange(label="PCA 2", minimum=y_min - y_margin, maximum=y_max + y_margin),
+        grid_resolution=grid_resolution,
+        grid_step_x=float((x_values[1] - x_values[0]) if len(x_values) > 1 else 0.0),
+        grid_step_y=float((y_values[1] - y_values[0]) if len(y_values) > 1 else 0.0),
+        class_labels=class_labels,
         explained_variance_ratio=[float(value) for value in getattr(pca, "explained_variance_ratio_", [])],
         points=points,
         grid=grid,
@@ -272,3 +403,32 @@ def _stringify(value: Any) -> str | None:
     if isinstance(value, float) and pd.isna(value):
         return None
     return str(value)
+
+
+def _compute_cluster_centroids(points: list[BoundaryPoint], labels: list[str]) -> dict[str, tuple[float, float]]:
+    centroids: dict[str, tuple[float, float]] = {}
+    for label in labels:
+        label_points = [point for point in points if (point.cluster_id or "unknown") == label]
+        if not label_points:
+            continue
+        xs = [point.x for point in label_points]
+        ys = [point.y for point in label_points]
+        centroids[label] = (float(np.mean(xs)), float(np.mean(ys)))
+    return centroids
+
+
+def _predict_grid_cluster(x: float, y: float, centroids: dict[str, tuple[float, float]]) -> tuple[str | None, float]:
+    if not centroids:
+        return None, 0.0
+    distances: list[tuple[str, float]] = []
+    for label, (cx, cy) in centroids.items():
+        distance = float(np.linalg.norm(np.array([x - cx, y - cy])))
+        distances.append((label, distance))
+    distances.sort(key=lambda item: item[1])
+    nearest_label, nearest_distance = distances[0]
+    if len(distances) == 1:
+        confidence = 1.0 / (1.0 + nearest_distance)
+        return nearest_label, max(0.0, min(1.0, confidence))
+    second_distance = distances[1][1]
+    confidence = 1.0 - (nearest_distance / max(second_distance, 1e-6))
+    return nearest_label, max(0.0, min(1.0, confidence))

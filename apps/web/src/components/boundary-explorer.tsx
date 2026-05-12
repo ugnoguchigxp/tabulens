@@ -91,10 +91,12 @@ export function BoundaryExplorer({
   );
 
   const pointCount = boundary?.statistics?.point_count ?? boundary?.points?.length ?? 0;
+  const graphKind = boundary?.statistics?.graph_kind === 'clustering' ? 'clustering' : 'classification';
   const misclassifiedCount = boundary?.statistics?.misclassified_count ?? 0;
   const lowConfidenceCount = boundary?.statistics?.low_confidence_count ?? 0;
   const islandCount = boundary?.statistics?.island_count ?? 0;
   const outlierCount = boundary?.statistics?.outlier_count ?? 0;
+  const noiseCount = boundary?.statistics?.noise_count ?? outlierCount;
   const variance = Array.isArray(boundary?.explained_variance_ratio) ? boundary.explained_variance_ratio : [];
 
   return (
@@ -103,7 +105,7 @@ export function BoundaryExplorer({
         <div className="flex items-start justify-between gap-2">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Boundary Explorer</p>
-            <h4 className="text-sm font-bold text-foreground">Decision Surface</h4>
+            <h4 className="text-sm font-bold text-foreground">{graphKind === 'clustering' ? 'Cluster Surface' : 'Decision Surface'}</h4>
           </div>
           <div className="flex flex-wrap justify-end gap-1">
             <Badge variant="secondary" className="text-[10px]">PCA</Badge>
@@ -153,10 +155,10 @@ export function BoundaryExplorer({
         ) : boundary ? (
           <>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <Metric label="Misclassified" value={misclassifiedCount} />
+              <Metric label={graphKind === 'clustering' ? 'Noise Points' : 'Misclassified'} value={graphKind === 'clustering' ? noiseCount : misclassifiedCount} />
               <Metric label="Low confidence" value={lowConfidenceCount} />
-              <Metric label="Islands" value={islandCount} />
-              <Metric label="Outliers" value={outlierCount} />
+              <Metric label={graphKind === 'clustering' ? 'Small Clusters' : 'Islands'} value={islandCount} />
+              <Metric label={graphKind === 'clustering' ? 'Outlier-like' : 'Outliers'} value={outlierCount} />
             </div>
 
             <div className="rounded-2xl border bg-white p-3 shadow-inner">
@@ -275,15 +277,15 @@ export function BoundaryExplorer({
                 </div>
                 {selectedPoint && (
                   <Badge variant={selectedPoint.is_misclassified ? 'destructive' : 'secondary'} className="text-[10px] uppercase">
-                    {selectedPoint.is_misclassified ? 'mismatch' : 'match'}
+                    {graphKind === 'clustering' ? (selectedPoint.is_outlier ? 'noise' : 'clustered') : (selectedPoint.is_misclassified ? 'mismatch' : 'match')}
                   </Badge>
                 )}
               </div>
 
               {selectedPoint ? (
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                  <Metric label="True" value={selectedPoint.true_label ?? 'n/a'} />
-                  <Metric label="Predicted" value={selectedPoint.predicted_label ?? 'n/a'} />
+                  <Metric label={graphKind === 'clustering' ? 'Cluster' : 'True'} value={graphKind === 'clustering' ? (selectedPoint.cluster_id ?? 'n/a') : (selectedPoint.true_label ?? 'n/a')} />
+                  <Metric label={graphKind === 'clustering' ? 'Label' : 'Predicted'} value={graphKind === 'clustering' ? (selectedPoint.predicted_label ?? 'n/a') : (selectedPoint.predicted_label ?? 'n/a')} />
                   <Metric label="Confidence" value={formatRatio(selectedPoint.confidence ?? 0)} />
                   <Metric label="Priority" value={selectedPoint.review_priority ?? 0} />
                   <Metric label="Cluster" value={selectedPoint.cluster_id ?? 'n/a'} />
@@ -291,7 +293,9 @@ export function BoundaryExplorer({
                 </div>
               ) : (
                 <p className="mt-2 text-sm text-muted-foreground">
-                  境界付近の点をクリックすると、真のラベル・予測ラベル・信頼度・クラスタ情報を確認できます。
+                  {graphKind === 'clustering'
+                    ? '点をクリックすると、クラスタ・信頼度・ノイズ/小クラスタ判定を確認できます。'
+                    : '境界付近の点をクリックすると、真のラベル・予測ラベル・信頼度・クラスタ情報を確認できます。'}
                 </p>
               )}
             </div>

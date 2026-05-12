@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import joblib
 import pandas as pd
 
 from app.core.paths import RESULT_DIR
@@ -55,6 +56,22 @@ def save_result_artifacts(job_id: str, result_df: pd.DataFrame, name: str = "cur
     result_df.to_csv(csv_path, index=False)
     result_df.to_excel(xlsx_path, index=False)
     return csv_path, xlsx_path
+
+
+def save_model_artifacts(job_id: str, artifacts: dict[str, Any], name: str = "model_artifacts") -> Path:
+    path = job_artifact_path(job_id, name, "joblib")
+    joblib.dump(artifacts, path)
+    return path
+
+
+def load_model_artifacts(job_id: str, name: str = "model_artifacts") -> dict[str, Any] | None:
+    path = job_artifact_path(job_id, name, "joblib")
+    if not path.exists():
+        return None
+    payload = joblib.load(path)
+    if isinstance(payload, dict):
+        return payload
+    return None
 
 
 def _to_jsonable(value: Any) -> Any:

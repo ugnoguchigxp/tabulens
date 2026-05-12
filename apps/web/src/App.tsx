@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { AgGridReact } from 'ag-grid-react'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-quartz.css'
-import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Sparkles, Database, Gauge, ArrowDownNarrowWide, Maximize2, Play, Search } from 'lucide-react'
+import { BarChart3, Settings2, Upload, Table as TableIcon, Plus, Trash2, Eraser, Columns, Rows, X, Sparkles, Database, Gauge, ArrowDownNarrowWide, Maximize2, Play, Search, LineChart } from 'lucide-react'
 import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community'
 
 ModuleRegistry.registerModules([AllCommunityModule])
@@ -16,6 +16,7 @@ import { BoundaryExplorer } from '@/components/boundary-explorer'
 import { WorkflowDrawer } from '@/components/workflow-drawer'
 import { WorkflowPanel } from '@/components/workflow-panel'
 import { ExplorationPanel } from '@/components/exploration-panel'
+import { ComputedChartPanel } from '@/components/computed-chart-panel'
 import {
   useUploadWorkbook,
   useRunAnalysis,
@@ -27,6 +28,7 @@ import {
 } from '@/hooks/use-tabulens'
 import { useGridEditor } from '@/hooks/use-grid-editor'
 import { PrepareDrawer } from '@/components/prepare-drawer'
+import { toColumnLabel } from '@/calc-engine/address'
 
 import {
   isNumericColumn,
@@ -60,26 +62,13 @@ function App() {
   const [showWorkflowDrawer, setShowWorkflowDrawer] = useState(false)
   const [showBoundaryModal, setShowBoundaryModal] = useState(false)
   const [showAnalysisDrawer, setShowAnalysisDrawer] = useState(false)
+  const [showChartPanel, setShowChartPanel] = useState(false)
+  const [activeCell, setActiveCell] = useState<{ rowIndex: number | null; colId: string | null }>({ rowIndex: null, colId: null })
+  const [formulaBarInput, setFormulaBarInput] = useState('')
   const [explorationResult, setExplorationResult] = useState<any | null>(null)
   const [manuallyDroppedFeatures, setManuallyDroppedFeatures] = useState<string[]>([])
   const [sheetPage, setSheetPage] = useState(0)
 
-  const {
-    localRowData,
-    setLocalRowData,
-    extraColumns,
-    contextMenu,
-    setContextMenu,
-    closeContextMenu,
-    handleInsertRow,
-    handleDeleteRow,
-    handleInsertColumn,
-    handleDeleteColumn,
-    removeColumn,
-    handleClearCell,
-    columnKeys,
-  } = useGridEditor([])
-  
   // Analysis Settings State
   const [analysisSettings, setAnalysisSettings] = useState({
     run_cleansing: true,
@@ -109,9 +98,42 @@ function App() {
     data: workflowBoundary,
     isLoading: workflowBoundaryLoading,
     error: workflowBoundaryError,
-  } = useWorkflowBoundary(activeWorkflowId, !!activeWorkflowId && workflowResult?.use_case === 'classification')
+  } = useWorkflowBoundary(activeWorkflowId, !!activeWorkflowId && ['classification', 'clustering'].includes(workflowResult?.use_case ?? ''))
 
   const workbookData = uploadMutation.data as WorkbookUploadResponse | undefined
+  const activeSheetName = workbookData?.sheets[selectedSheet]?.name ?? 'Sheet1'
+  const predictResolver = useCallback((featureValues: unknown[]) => {
+    if (!activeWorkflowId || !Array.isArray(workflowResult?.rows)) {
+      return '#PREDICT_ERR'
+    }
+    const targetKey = workflowResult.use_case === 'classification' ? '_predicted_class' : '_predicted_value'
+    const features = mapping.feature_columns.filter((name) => name !== mapping.label_column)
+    const matched = workflowResult.rows.find((row: Record<string, unknown>) => (
+      features.every((featureName, index) => String(row[featureName] ?? '') === String(featureValues[index] ?? ''))
+    ))
+    return matched?.[targetKey] ?? '#PREDICT_ERR'
+  }, [activeWorkflowId, workflowResult, mapping.feature_columns, mapping.label_column])
+
+  const {
+    localRowData,
+    setLocalRowData,
+    extraColumns,
+    contextMenu,
+    setContextMenu,
+    closeContextMenu,
+    handleInsertRow,
+    handleDeleteRow,
+    handleInsertColumn,
+    handleDeleteColumn,
+    removeColumn,
+    handleClearCell,
+    columnKeys,
+    updateCellInput,
+    getCellRawInput,
+    getCellAddress,
+    getFormulaTooltip,
+  } = useGridEditor([], activeSheetName, { workflowId: activeWorkflowId, predictResolver })
+
   const featureImportance = jobMetadata?.feature_importance as Record<string, number> | undefined
   const allDroppedFeatures = useMemo(() => manuallyDroppedFeatures, [manuallyDroppedFeatures])
   const activeSheet = workbookData?.sheets[selectedSheet]
@@ -131,7 +153,7 @@ function App() {
   const selectedLabelIsCategorical = selectedLabelColumn ? !isNumericColumn(selectedLabelColumn) : false
   const boundaryFeatureCount = mapping.feature_columns.filter((feature) => feature !== mapping.label_column).length
   const boundaryReady = !!mapping.label_column && selectedLabelIsCategorical && boundaryFeatureCount >= 2
-  const workflowBoundaryReady = !!activeWorkflowId && workflowResult?.use_case === 'classification'
+  const workflowBoundaryReady = !!activeWorkflowId && ['classification', 'clustering'].includes(workflowResult?.use_case ?? '')
   const workbookPreviewMode = !!workbookData && !activeJobId && !activeWorkflowId
   const allowDraftRowExtension = !resultRows && !activeWorkflowId
   const isProcessing = resultsLoading || analysisMutation.isPending || workflowMutation.isPending || explorationMutation.isPending
@@ -141,10 +163,31 @@ function App() {
   const activeBoundaryLoading = workflowBoundaryReady ? workflowBoundaryLoading : boundaryLoading
   const activeBoundaryError = workflowBoundaryReady ? workflowBoundaryError : boundaryError
   const totalWorkbookPages = Math.max(1, Math.ceil(sourceRowCount / 100))
+  const activeCellAddress = useMemo(() => {
+    if (activeCell.rowIndex == null || !activeCell.colId) return ''
+    return getCellAddress(activeCell.rowIndex, activeCell.colId) ?? ''
+  }, [activeCell, getCellAddress])
+
+  useEffect(() => {
+    if (activeCell.rowIndex == null || !activeCell.colId) {
+      setFormulaBarInput('')
+      return
+    }
+    const rawInput = getCellRawInput(activeCell.rowIndex, activeCell.colId)
+    if (rawInput == null) {
+      setFormulaBarInput('')
+      return
+    }
+    setFormulaBarInput(String(rawInput))
+  }, [activeCell, getCellRawInput, localRowData])
 
   useEffect(() => {
     if (resultRows) {
       setLocalRowData(resultRows)
+      return
+    }
+    if (activeJobId) {
+      // While a prepare job is active, do not overwrite the grid with source rows.
       return
     }
     if (activeWorkflowId && Array.isArray(workflowResult?.rows)) {
@@ -352,8 +395,17 @@ function App() {
     }]
     
     if (columnKeysList.length > 0) {
-      baseCols.push(...columnKeysList.map((key: string) => ({
-        field: key, headerName: key, flex: 1, minWidth: 150,
+      baseCols.push(...columnKeysList.map((key: string, index: number) => {
+        const columnLabel = toColumnLabel(index)
+        const hasFieldName = key.trim().length > 0
+        return ({
+        field: key, headerName: hasFieldName ? `${columnLabel} (${key})` : columnLabel, headerTooltip: key, flex: 1, minWidth: 150,
+        tooltipValueGetter: (params: any) => {
+          if (params.node?.rowIndex == null) {
+            return null
+          }
+          return getFormulaTooltip(params.node.rowIndex, key)
+        },
         cellClass: (params: any) => {
           const field = params.colDef.field;
           if (field.startsWith('norm_')) return 'bg-blue-50/30'
@@ -361,10 +413,10 @@ function App() {
           if (extraColumns.includes(field)) return 'bg-yellow-50/30'
           return ''
         }
-      })))
+      })}))
     }
     return baseCols
-  }, [columnKeysList, extraColumns])
+  }, [columnKeysList, extraColumns, getFormulaTooltip])
 
   return (
     <div className="flex h-screen flex-col bg-background overflow-hidden relative">
@@ -504,6 +556,14 @@ function App() {
               >
                 <Play className="size-4" />
                 <span className="hidden sm:inline">Workflow</span>
+              </Button>
+              <Button
+                variant={showChartPanel ? "secondary" : "ghost"}
+                className="h-9 gap-2 px-3"
+                onClick={() => setShowChartPanel((current) => !current)}
+              >
+                <LineChart className="size-4" />
+                <span className="hidden sm:inline">Charts</span>
               </Button>
             </>
           )}
@@ -678,6 +738,39 @@ function App() {
 
         <div className="flex flex-1 min-w-0 flex-col xl:flex-row overflow-hidden">
           <div className="flex flex-1 flex-col overflow-hidden">
+            {workbookData && (
+              <div className="border-b bg-slate-50/60 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-20 shrink-0 rounded border bg-white px-2 py-1 text-xs font-mono text-center">
+                    {activeCellAddress || '—'}
+                  </div>
+                  <div className="text-xs font-semibold text-muted-foreground">fx</div>
+                  <input
+                    value={formulaBarInput}
+                    onChange={(event) => setFormulaBarInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter') return
+                      if (activeCell.rowIndex == null || !activeCell.colId) return
+                      updateCellInput(activeCell.rowIndex, activeCell.colId, formulaBarInput)
+                    }}
+                    placeholder="Select a cell and type value or formula (e.g. =A1+B1)"
+                    className="h-8 flex-1 rounded border bg-white px-2 text-xs"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-3 text-xs"
+                    disabled={activeCell.rowIndex == null || !activeCell.colId}
+                    onClick={() => {
+                      if (activeCell.rowIndex == null || !activeCell.colId) return
+                      updateCellInput(activeCell.rowIndex, activeCell.colId, formulaBarInput)
+                    }}
+                  >
+                    Apply
+                  </Button>
+                </div>
+              </div>
+            )}
             {!workbookData && !uploadMutation.isPending ? (
               <div className="flex flex-1 flex-col items-center justify-center bg-slate-50/50">
                 <div className="rounded-full bg-white p-10 shadow-sm border mb-6 transition-transform hover:scale-105 duration-500"><TableIcon className="size-16 text-slate-200" /></div>
@@ -704,6 +797,12 @@ function App() {
                   onCellContextMenu={onCellContextMenu}
                   enterNavigatesVerticallyAfterEdit={true}
                   onCellFocused={(p) => {
+                    const focusedColId = p.column && typeof p.column !== 'string' ? p.column.getColId() : null
+                    const focusedField = focusedColId && columnKeysList.includes(focusedColId) ? focusedColId : null
+                    setActiveCell({
+                      rowIndex: p.rowIndex ?? null,
+                      colId: focusedField,
+                    })
                     if (!allowDraftRowExtension) {
                       return
                     }
@@ -726,6 +825,15 @@ function App() {
                     sortable: true, 
                     filter: true, 
                     resizable: true, 
+                    valueSetter: (params) => {
+                      const rowIndex = params.node?.rowIndex
+                      const colId = params.colDef.field
+                      if (rowIndex == null || typeof colId !== 'string') {
+                        return false
+                      }
+                      updateCellInput(rowIndex, colId, params.newValue)
+                      return false
+                    },
                     valueFormatter: (p) => p.value == null ? "" : String(p.value),
                     suppressMovable: false,
                   }}
@@ -746,6 +854,12 @@ function App() {
             <ExplorationPanel result={explorationResult} />
           )}
         </div>
+
+        {showChartPanel && (
+          <aside className="w-full xl:w-[360px] shrink-0 border-t xl:border-t-0 xl:border-l bg-slate-50/40 overflow-y-auto p-4">
+            <ComputedChartPanel rows={localRowData} />
+          </aside>
+        )}
       </main>
 
       {workbookData && (

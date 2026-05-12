@@ -25,6 +25,8 @@ MVP の主導線は `Prepare`・`Explore`・`Workflow` の 3 つです。
 - グリッド編集
   - AG Grid ベースで閲覧・編集
   - 行追加 / 行削除 / 列追加 / 列削除 / セルクリア
+  - `=...` 形式の数式入力（計算結果表示 + raw formula 保持）
+  - `Recalc` による volatile 関数の明示再計算
 - Mapping Settings
   - `ID Column` / `Label Column` / `Features` を指定
   - Label に指定した列は特徴量から自動除外
@@ -43,8 +45,11 @@ MVP の主導線は `Prepare`・`Explore`・`Workflow` の 3 つです。
   - `classification` / `prediction` / `anomaly_detection` / `clustering`
   - 実行結果と指標を右パネル表示
   - `.xlsx` エクスポート
+  - `PREDICT()` 用の推論 API（workflow artifact 利用）
 - Boundary Graph
   - 分類ワークフローで表示可能
+- Charts
+  - 計算結果の numeric 列から line / bar / scatter を表示
 
 ## 対応ワークフロー
 
@@ -94,31 +99,40 @@ tabulens/
 ### 前提
 
 - Python 3.10+
-- Node.js
+- Node.js 18+
 - pnpm
 
-### Backend
+### クイックスタート
+
+ルートディレクトリで以下のコマンドを実行するだけで、フロントエンドのビルドからサーバーの起動まで一括で行われます。
 
 ```bash
-cd apps/api
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-uvicorn app.main:app --reload --port 18273
+pnpm install
+pnpm start
 ```
 
-### Frontend
+起動後、 [http://localhost:8000](http://localhost:8000) にアクセスしてください。
 
+> [!NOTE]
+> このコマンドは自動的に Python の仮想環境（`.venv`）を作成し、必要なパッケージをインストールします。
+
+### 個別に起動する場合（開発用）
+
+フロントエンドのホットリロードなどが必要な場合は、個別に起動することも可能です。
+
+**Backend:**
+```bash
+cd apps/api
+# 初回のみ: python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
+
+**Frontend:**
 ```bash
 cd apps/web
 pnpm install
 pnpm dev
-```
-
-必要に応じて API URL を上書きできます。
-
-```bash
-VITE_API_BASE_URL=http://localhost:18273/api pnpm dev
 ```
 
 ## 基本的な使い方
@@ -142,6 +156,7 @@ VITE_API_BASE_URL=http://localhost:18273/api pnpm dev
 | `GET` | `/api/workbooks/{workbook_id}/sheets/{sheet_name}/preview` | 先頭 10 行プレビュー |
 | `GET` | `/api/workbooks/{workbook_id}/sheets/{sheet_name}/rows?offset=0&limit=100` | 行ページ取得 |
 | `GET` | `/api/workbooks/{workbook_id}/sheets/{sheet_name}/profile` | シート統計取得 |
+| `GET` | `/api/workbooks/{workbook_id}/formulas` | workbook 内 formula metadata 取得 |
 
 ### Prepare Jobs
 
@@ -162,6 +177,7 @@ VITE_API_BASE_URL=http://localhost:18273/api pnpm dev
 | `GET` | `/api/model-workflows/{workflow_id}/rows` | 結果行 |
 | `GET` | `/api/model-workflows/{workflow_id}/metrics` | 指標 |
 | `GET` | `/api/model-workflows/{workflow_id}/boundary` | 分類境界グラフ用データ |
+| `POST` | `/api/model-workflows/{workflow_id}/predict` | workflow artifact で推論 |
 | `GET` | `/api/model-workflows/{workflow_id}/export.xlsx` | Workflow エクスポート |
 
 ### Explorations
@@ -191,6 +207,14 @@ pnpm build
 ## 関連ドキュメント
 
 - [探索評価機能 実装計画](docs/exploration-evaluation-implementation-plan.md)
+- [Calc Engine 実装計画](docs/calc-engine-implementation-plan.md)
+- [対応数式一覧](docs/supported-formulas.md)
+
+## 数式メタデータ方針
+
+- `.xlsx` upload 時に formula metadata（`sheet_name`, `address`, `formula`, `cached_value`）を保存
+- Prepare / Workflow の export には `formulas` sheet を同梱
+- 表示値と formula は別責務として保持し、formula 追跡は `formulas` sheet で行う
 
 ## ライセンス
 
